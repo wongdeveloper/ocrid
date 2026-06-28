@@ -10,6 +10,10 @@ pipeline {
   environment {
     PIP_DISABLE_PIP_VERSION_CHECK = '1'
     PYTHONUNBUFFERED = '1'
+    NGINX_SITE_NAME = 'ocrid.wong.systems'
+    NGINX_SERVER_NAME = 'ocrid.wong.systems'
+    OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
+    WHATSAPP_UPSTREAM = 'http://127.0.0.1:3001'
   }
 
   stages {
@@ -67,6 +71,76 @@ pipeline {
             sh 'npm run test:whatsapp-web'
           }
         }
+      }
+    }
+
+    stage('Configure Nginx') {
+      steps {
+        sh '''
+          set -eu
+
+          if ! command -v nginx >/dev/null 2>&1; then
+            echo "nginx is not installed on this Jenkins agent."
+            exit 1
+          fi
+
+          SUDO="sudo"
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          fi
+
+          site_available="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
+          site_enabled="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
+          tmp_file="$(mktemp)"
+          trap 'rm -f "$tmp_file"' EXIT
+
+          cat > "$tmp_file" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${NGINX_SERVER_NAME};
+
+    client_max_body_size 25m;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    location /whatsapp/ {
+        proxy_pass ${WHATSAPP_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass ${OCR_API_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+NGINX
+
+          $SUDO install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+          $SUDO install -m 0644 "$tmp_file" "$site_available"
+          $SUDO ln -sfn "$site_available" "$site_enabled"
+          $SUDO nginx -t
+
+          if command -v systemctl >/dev/null 2>&1; then
+            $SUDO systemctl reload nginx
+          elif command -v service >/dev/null 2>&1; then
+            $SUDO service nginx reload
+          else
+            $SUDO nginx -s reload
+          fi
+        '''
       }
     }
   }

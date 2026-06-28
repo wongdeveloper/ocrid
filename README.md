@@ -170,6 +170,8 @@ Jenkins agent requirements:
 - Node.js 20 or newer
 - npm
 - Python 3.12 or newer
+- Nginx installed when the deployment stage runs
+- Passwordless `sudo` for creating `/etc/nginx/sites-available/ocrid.wong.systems`, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx
 
 Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 
@@ -179,6 +181,8 @@ Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 - Script path: `Jenkinsfile`
 
 Do not commit `.env`. Configure production secrets such as `OPENAI_API_KEY`, WhatsApp keys, and bridge API keys through Jenkins credentials or deployment environment variables.
+
+The Nginx stage creates `/etc/nginx/sites-available/ocrid.wong.systems`, enables it at `/etc/nginx/sites-enabled/ocrid.wong.systems`, proxies `/` to the OCR API on `127.0.0.1:6017`, and proxies `/whatsapp/` to the WhatsApp worker on `127.0.0.1:3001`. Configure TLS separately with Certbot or your preferred certificate automation.
 
 ## Run Automatically On Mac
 
