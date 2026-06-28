@@ -171,7 +171,7 @@ Jenkins agent requirements:
 - npm
 - Python 3.12 or newer
 - Nginx installed when the deployment stage runs
-- Passwordless `sudo` for creating `/etc/nginx/sites-available/ocrid.wong.systems`, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx
+- A Jenkins **Secret text** credential with ID `ocrid-sudo-password`, containing the sudo password for the Jenkins agent user. The pipeline passes this to `sudo -S` for creating `/etc/nginx/sites-available/ocrid.wong.systems`, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx.
 
 Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 

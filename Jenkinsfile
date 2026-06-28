@@ -76,25 +76,35 @@ pipeline {
 
     stage('Configure Nginx') {
       steps {
-        sh '''
-          set -eu
+        withCredentials([string(credentialsId: 'ocrid-sudo-password', variable: 'SUDO_PASSWORD')]) {
+          sh '''
+            set -eu
 
-          if ! command -v nginx >/dev/null 2>&1; then
-            echo "nginx is not installed on this Jenkins agent."
-            exit 1
-          fi
+            if ! command -v nginx >/dev/null 2>&1; then
+              echo "nginx is not installed on this Jenkins agent."
+              exit 1
+            fi
 
-          SUDO="sudo"
-          if [ "$(id -u)" -eq 0 ]; then
-            SUDO=""
-          fi
+            sudo_run() {
+              if [ "$(id -u)" -eq 0 ]; then
+                "$@"
+                return
+              fi
 
-          site_available="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
-          site_enabled="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
-          tmp_file="$(mktemp)"
-          trap 'rm -f "$tmp_file"' EXIT
+              if [ -z "${SUDO_PASSWORD:-}" ]; then
+                echo "Jenkins credential 'ocrid-sudo-password' is empty or unavailable."
+                exit 1
+              fi
 
-          cat > "$tmp_file" <<NGINX
+              printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
+            }
+
+            site_available="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
+            site_enabled="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
+            tmp_file="$(mktemp)"
+            trap 'rm -f "$tmp_file"' EXIT
+
+            cat > "$tmp_file" <<NGINX
 server {
     listen 80;
     listen [::]:80;
@@ -128,19 +138,20 @@ server {
 }
 NGINX
 
-          $SUDO install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
-          $SUDO install -m 0644 "$tmp_file" "$site_available"
-          $SUDO ln -sfn "$site_available" "$site_enabled"
-          $SUDO nginx -t
+            sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+            sudo_run install -m 0644 "$tmp_file" "$site_available"
+            sudo_run ln -sfn "$site_available" "$site_enabled"
+            sudo_run nginx -t
 
-          if command -v systemctl >/dev/null 2>&1; then
-            $SUDO systemctl reload nginx
-          elif command -v service >/dev/null 2>&1; then
-            $SUDO service nginx reload
-          else
-            $SUDO nginx -s reload
-          fi
-        '''
+            if command -v systemctl >/dev/null 2>&1; then
+              sudo_run systemctl reload nginx
+            elif command -v service >/dev/null 2>&1; then
+              sudo_run service nginx reload
+            else
+              sudo_run nginx -s reload
+            fi
+          '''
+        }
       }
     }
   }
