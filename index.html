@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Indonesia ID Intelligence</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Indonesia Identity Intelligence</p>
+          <h1>ID Intelligence</h1>
+        </div>
+        <div class="topbar-actions">
+          <button id="copyAllBtn" class="ghost-button" type="button" disabled>
+            <i data-lucide="copy" aria-hidden="true"></i>
+            Copy
+          </button>
+          <button id="downloadBtn" class="ghost-button" type="button" disabled>
+            <i data-lucide="download" aria-hidden="true"></i>
+            JSON
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="input-panel" aria-labelledby="inputTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Source</p>
+              <h2 id="inputTitle">KTP or Driver License Image</h2>
+            </div>
+            <span id="privacyBadge" class="privacy-badge">Checking engine</span>
+          </div>
+
+          <div id="dropZone" class="drop-zone" tabindex="0">
+            <input id="fileInput" type="file" accept="image/*" />
+            <div class="drop-visual" aria-hidden="true">
+              <div class="id-card-shape">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+            <div class="drop-copy">
+              <strong>Drop KTP or SIM photo here</strong>
+              <span>or select an image from this device</span>
+            </div>
+            <button id="selectBtn" class="primary-button" type="button">
+              <i data-lucide="image-plus" aria-hidden="true"></i>
+              Upload ID
+            </button>
+          </div>
+
+          <div class="capture-row">
+            <label class="file-action">
+              <i data-lucide="camera" aria-hidden="true"></i>
+              Take Photo
+              <input id="cameraInput" type="file" accept="image/*" capture="environment" />
+            </label>
+            <button id="clearBtn" class="icon-button" type="button" disabled aria-label="Clear image" title="Clear image">
+              <i data-lucide="x" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="preview-wrap">
+            <div class="preview-toolbar">
+              <div class="segmented" role="group" aria-label="Preprocess mode">
+                <button class="segment active" type="button" data-mode="balanced">Balanced</button>
+                <button class="segment" type="button" data-mode="sharp">Sharp</button>
+                <button class="segment" type="button" data-mode="original">Original</button>
+              </div>
+              <button id="rotateBtn" class="icon-button" type="button" disabled aria-label="Rotate image" title="Rotate image">
+                <i data-lucide="rotate-cw" aria-hidden="true"></i>
+              </button>
+            </div>
+            <canvas id="previewCanvas" width="1200" height="760"></canvas>
+          </div>
+
+          <div class="ocr-controls">
+            <label for="engineSelect">Engine</label>
+            <select id="engineSelect">
+              <option value="auto">Automatic hybrid</option>
+              <option value="ai">AI vision</option>
+              <option value="local">Python local OCR</option>
+              <option value="browser">Browser OCR</option>
+            </select>
+            <label for="langSelect" class="browser-language-label">Language</label>
+            <select id="langSelect">
+              <option value="ind">Indonesian ID</option>
+              <option value="eng">English fallback</option>
+            </select>
+            <button id="runBtn" class="primary-button" type="button" disabled>
+              <i data-lucide="scan-text" aria-hidden="true"></i>
+              Analyze ID
+            </button>
+          </div>
+
+          <div class="progress-shell" aria-live="polite">
+            <div class="progress-header">
+              <span id="statusText">Waiting for image</span>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="progressBar" class="progress-bar"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="output-panel" aria-labelledby="resultTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Extracted Text</p>
+              <h2 id="resultTitle">Identity Fields</h2>
+            </div>
+            <button id="resetFieldsBtn" class="ghost-button" type="button" disabled>
+              <i data-lucide="refresh-ccw" aria-hidden="true"></i>
+              Re-parse
+            </button>
+          </div>
+
+          <div id="fieldsGrid" class="fields-grid"></div>
+
+          <div id="qualityPanel" class="quality-panel" hidden>
+            <div class="quality-metric">
+              <span>Document</span>
+              <strong id="documentValue">-</strong>
+            </div>
+            <div class="quality-metric">
+              <span>Engine</span>
+              <strong id="engineValue">-</strong>
+            </div>
+            <div class="quality-metric">
+              <span>Confidence</span>
+              <strong id="confidenceValue">-</strong>
+            </div>
+            <div class="quality-warnings">
+              <span>Validation</span>
+              <ul id="warningList"></ul>
+            </div>
+          </div>
+
+          <div class="formatted-section">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">EYD Export</p>
+                <h2>Formatted ID</h2>
+              </div>
+              <button
+                id="copyFormattedBtn"
+                class="icon-button"
+                type="button"
+                disabled
+                aria-label="Copy formatted ID"
+                title="Copy formatted ID"
+              >
+                <i data-lucide="clipboard-copy" aria-hidden="true"></i>
+              </button>
+            </div>
+            <textarea
+              id="formattedText"
+              spellcheck="false"
+              readonly
+              placeholder="Formatted ID export will appear here"
+            ></textarea>
+          </div>
+
+          <div class="raw-section">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">OCR</p>
+                <h2>Raw Output</h2>
+              </div>
+              <button id="copyRawBtn" class="icon-button" type="button" disabled aria-label="Copy raw text" title="Copy raw text">
+                <i data-lucide="clipboard" aria-hidden="true"></i>
+              </button>
+            </div>
+            <textarea id="rawText" spellcheck="false" placeholder="OCR text will appear here"></textarea>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="node_modules/lucide/dist/umd/lucide.min.js"></script>
+    <script src="node_modules/tesseract.js/dist/tesseract.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
