@@ -1,6 +1,15 @@
 import unittest
 
-from ktp_ai import KtpFields, detect_document_type, format_fields, normalize_fields, parse_local_ocr, validate_fields
+from ktp_ai import (
+    KtpFields,
+    compact_ocr_context,
+    detect_document_type,
+    format_fields,
+    needs_accurate_ai_retry,
+    normalize_fields,
+    parse_local_ocr,
+    validate_fields,
+)
 
 
 class KtpAiTests(unittest.TestCase):
@@ -64,6 +73,44 @@ class KtpAiTests(unittest.TestCase):
 
         warnings = validate_fields(fields)
         self.assertIn("NIK birth-date digits do not match Tempat/Tgl Lahir.", warnings)
+
+    def test_compact_ocr_context_keeps_identity_lines(self):
+        context = compact_ocr_context(
+            """
+            PASS 1 PSM 6
+            %% @@ noisy unreadable %% %% %% %% %%
+            PROVINSI JAWA TIMUR
+            NIK: 3578100101900001
+            Nama: BUDI SANTOSO
+            Tempat/Tgl Lahir: SURABAYA, 01-01-1990
+            Alamat: JL MERDEKA NO 1
+            RT/RW: 001/002
+            """ * 3,
+            max_chars=300,
+        )
+
+        self.assertLessEqual(len(context), 300)
+        self.assertIn("NIK", context)
+        self.assertIn("BUDI SANTOSO", context)
+        self.assertIn("001/002", context)
+
+    def test_retry_gate_allows_nik_birth_mismatch_only(self):
+        fields = KtpFields(
+            documentType="KTP",
+            name="BUDI SANTOSO",
+            nik="3578100201900001",
+            birth="SURABAYA, 01-01-1990",
+            religion="ISLAM",
+            address="JL MERDEKA NO 1",
+            city="KOTA SURABAYA",
+        )
+
+        self.assertFalse(needs_accurate_ai_retry(fields, 0.9, []))
+
+    def test_retry_gate_retries_missing_required_fields(self):
+        fields = KtpFields(documentType="KTP", name="BUDI SANTOSO", nik="3578100101900001")
+
+        self.assertTrue(needs_accurate_ai_retry(fields, 0.9, []))
 
     def test_parser_accepts_valid_nik_from_unlisted_region(self):
         fields = parse_local_ocr("NIK: 3305120310920002")

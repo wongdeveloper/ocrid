@@ -46,9 +46,12 @@ Set these values in `.env`:
 OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-5.5
 OPENAI_OCR_MODEL=gpt-4.1
+OPENAI_OCR_ADAPTIVE=true
 ```
 
 Restart `npm run start` after changing `.env`. `OPENAI_OCR_MODEL` is optional; when present, the OCR pipeline uses it for image extraction while `OPENAI_MODEL` can remain your general default. AI mode sends the KTP or SIM image to the configured OpenAI API account. Leave `OPENAI_API_KEY` empty to keep processing local.
+
+`OPENAI_OCR_ADAPTIVE=true` reduces average token usage by sending broad KTP context images at low detail, keeping the focused NIK/name/address/RT-RW crops at high detail, and retrying with the full accurate payload only when validation detects an incomplete or risky extraction. Set `OPENAI_OCR_ADAPTIVE=false` to force the previous full-detail single-pass behavior.
 
 ## Batch testing
 

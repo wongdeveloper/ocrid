@@ -61,6 +61,13 @@ class ImageCandidate:
     image: Image.Image
 
 
+@dataclass(frozen=True)
+class AiImageData:
+    label: str
+    image_url: str
+    detail: Literal["low", "high", "auto", "original"]
+
+
 REGIONS = {
     "357305": ("JAWA TIMUR", "KOTA MALANG", "LOWOKWARU"),
     "357803": ("JAWA TIMUR", "KOTA SURABAYA", "RUNGKUT"),
@@ -139,6 +146,9 @@ class KtpExtractor:
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5")
         self.openai_ocr_model = os.getenv("OPENAI_OCR_MODEL", self.openai_model)
+        self.openai_ocr_adaptive = env_flag("OPENAI_OCR_ADAPTIVE", True)
+        self.openai_ocr_context_chars = env_int("OPENAI_OCR_CONTEXT_CHARS", 5000)
+        self.openai_ocr_fallback_context_chars = env_int("OPENAI_OCR_FALLBACK_CONTEXT_CHARS", 12000)
         self.tessdata_dir = ensure_tesseract_data()
         self.tesseract_language = os.getenv("TESSERACT_LANGUAGE", "ind+eng")
         self.tesseract_cmd = resolve_tesseract_cmd()
@@ -194,7 +204,35 @@ class KtpExtractor:
         from openai import OpenAI
 
         client = OpenAI(api_key=self.openai_api_key)
-        ai_images = ai_image_data_urls(image_bytes)
+        if self.openai_ocr_adaptive:
+            fields, confidence, warnings = self.ai_extract_once(
+                client,
+                image_bytes,
+                local_text,
+                profile="balanced",
+                max_ocr_chars=self.openai_ocr_context_chars,
+            )
+            if not needs_accurate_ai_retry(fields, confidence, warnings):
+                return fields, confidence, warnings
+
+        return self.ai_extract_once(
+            client,
+            image_bytes,
+            local_text,
+            profile="accurate",
+            max_ocr_chars=self.openai_ocr_fallback_context_chars,
+        )
+
+    def ai_extract_once(
+        self,
+        client,
+        image_bytes: bytes,
+        local_text: str,
+        profile: Literal["balanced", "accurate"],
+        max_ocr_chars: int,
+    ) -> tuple[KtpFields, float, list[str]]:
+        ai_images = ai_image_data_urls(image_bytes, profile=profile, document_hint=detect_document_type(local_text))
+        ocr_context = compact_ocr_context(local_text, max_chars=max_ocr_chars)
         prompt = f"""
 Classify and read the Indonesian identity document in the image. It may be:
 - KTP: Indonesian national identity card.
@@ -227,15 +265,19 @@ Rules:
 - Do not warn merely because the original photo is rotated if any supplied image variant is readable.
 
 OCR candidates:
-{local_text[:12000]}
+{ocr_context}
 """.strip()
 
         content = [{"type": "input_text", "text": prompt}]
-        for label, image_url in ai_images:
+        for image_data in ai_images:
             content.extend(
                 [
-                    {"type": "input_text", "text": f"Image variant: {label}"},
-                    {"type": "input_image", "image_url": image_url, "detail": "original"},
+                    {"type": "input_text", "text": f"Image variant: {image_data.label}"},
+                    {
+                        "type": "input_image",
+                        "image_url": image_data.image_url,
+                        "detail": image_data.detail,
+                    },
                 ]
             )
 
@@ -1072,36 +1114,51 @@ def title_case(value: str) -> str:
     return result
 
 
-def ai_image_data_urls(image_bytes: bytes) -> list[tuple[str, str]]:
+def ai_image_data_urls(
+    image_bytes: bytes,
+    profile: Literal["balanced", "accurate"] = "accurate",
+    document_hint: str = "",
+) -> list[AiImageData]:
     image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
     image.thumbnail((3000, 3000), Image.Resampling.LANCZOS)
     candidates = card_image_candidates(image)
     rotated = [candidate for candidate in candidates if candidate.label.startswith("rotated-")]
     selected = rotated[:2] if rotated else candidates[:1]
-    variants: list[tuple[str, Image.Image, int]] = []
+    variants: list[tuple[str, Image.Image, int, str]] = []
+    use_low_context = profile == "balanced" and document_hint == "KTP"
     for candidate in selected:
-        variants.append((candidate.label, candidate.image, 1800))
-        variants.extend(focused_ktp_crops(candidate.image))
+        variants.append((candidate.label, candidate.image, 1800, "low" if use_low_context else "original"))
+        variants.extend(focused_ktp_crops(candidate.image, profile=profile, low_context=use_low_context))
     return [
-        (label, image_to_data_url(variant, min_width=min_width))
-        for label, variant, min_width in dedupe_ai_variants(variants)
+        AiImageData(
+            label=label,
+            image_url=image_to_data_url(variant, min_width=min_width),
+            detail=normalize_image_detail(detail),
+        )
+        for label, variant, min_width, detail in dedupe_ai_variants(variants)
     ]
 
 
-def focused_ktp_crops(card: Image.Image) -> list[tuple[str, Image.Image, int]]:
+def focused_ktp_crops(
+    card: Image.Image,
+    profile: Literal["balanced", "accurate"] = "accurate",
+    low_context: bool = False,
+) -> list[tuple[str, Image.Image, int, str]]:
     width, height = card.size
     if width / max(height, 1) < 1.15:
         return []
 
+    context_detail = "low" if low_context else "original"
+    crop_detail = "high" if profile == "balanced" else "original"
     return [
-        ("ktp-text-fields", crop_fraction(card, 0.05, 0.14, 0.78, 0.82), 2600),
-        ("ktp-nik-name-birth", crop_fraction(card, 0.12, 0.14, 0.76, 0.42), 2800),
-        ("ktp-address", crop_fraction(card, 0.10, 0.36, 0.78, 0.66), 2800),
-        ("ktp-name-row-standard", enhance_ai_crop(crop_fraction(card, 0.18, 0.35, 0.78, 0.48)), 3000),
-        ("ktp-name-row-shifted", enhance_ai_crop(crop_fraction(card, 0.18, 0.43, 0.78, 0.55)), 3000),
-        ("ktp-address-row-standard", enhance_ai_crop(crop_fraction(card, 0.18, 0.47, 0.82, 0.63)), 3000),
-        ("ktp-address-row-shifted", enhance_ai_crop(crop_fraction(card, 0.18, 0.54, 0.82, 0.72)), 3000),
-        ("ktp-rt-rw-row", enhance_ai_crop(crop_fraction(card, 0.16, 0.60, 0.68, 0.78)), 3000),
+        ("ktp-text-fields", crop_fraction(card, 0.05, 0.14, 0.78, 0.82), 2600, context_detail),
+        ("ktp-nik-name-birth", crop_fraction(card, 0.12, 0.14, 0.76, 0.42), 2800, crop_detail),
+        ("ktp-address", crop_fraction(card, 0.10, 0.36, 0.78, 0.66), 2800, crop_detail),
+        ("ktp-name-row-standard", enhance_ai_crop(crop_fraction(card, 0.18, 0.35, 0.78, 0.48)), 3000, crop_detail),
+        ("ktp-name-row-shifted", enhance_ai_crop(crop_fraction(card, 0.18, 0.43, 0.78, 0.55)), 3000, crop_detail),
+        ("ktp-address-row-standard", enhance_ai_crop(crop_fraction(card, 0.18, 0.47, 0.82, 0.63)), 3000, crop_detail),
+        ("ktp-address-row-shifted", enhance_ai_crop(crop_fraction(card, 0.18, 0.54, 0.82, 0.72)), 3000, crop_detail),
+        ("ktp-rt-rw-row", enhance_ai_crop(crop_fraction(card, 0.16, 0.60, 0.68, 0.78)), 3000, crop_detail),
     ]
 
 
@@ -1117,18 +1174,88 @@ def crop_fraction(image: Image.Image, left: float, top: float, right: float, bot
     )
 
 
-def dedupe_ai_variants(variants: list[tuple[str, Image.Image, int]]) -> list[tuple[str, Image.Image, int]]:
-    unique: list[tuple[str, Image.Image, int]] = []
+def dedupe_ai_variants(variants: list[tuple[str, Image.Image, int, str]]) -> list[tuple[str, Image.Image, int, str]]:
+    unique: list[tuple[str, Image.Image, int, str]] = []
     seen: set[tuple[str, tuple[int, int]]] = set()
-    for label, image, min_width in variants:
+    for label, image, min_width, detail in variants:
         if image.width < 80 or image.height < 60:
             continue
         key = (label, image.size)
         if key in seen:
             continue
         seen.add(key)
-        unique.append((label, image, min_width))
+        unique.append((label, image, min_width, detail))
     return unique[:9]
+
+
+def normalize_image_detail(value: str) -> Literal["low", "high", "auto", "original"]:
+    return value if value in {"low", "high", "auto", "original"} else "high"
+
+
+def needs_accurate_ai_retry(fields: KtpFields, confidence: float, warnings: list[str]) -> bool:
+    normalized = normalize_fields(fields)
+    validation_warnings = [
+        warning
+        for warning in validate_fields(normalized)
+        if warning != "NIK birth-date digits do not match Tempat/Tgl Lahir."
+    ]
+    if normalized.documentType == "UNKNOWN" or confidence < 0.78:
+        return True
+    if validation_warnings:
+        return True
+    serious_ai_warning = any(
+        re.search(r"\b(?:not detected|not visible|unclear|unreadable|failed|cannot|could not)\b", warning, re.I)
+        for warning in warnings
+    )
+    return serious_ai_warning
+
+
+def compact_ocr_context(local_text: str, max_chars: int = 5000) -> str:
+    if max_chars <= 0:
+        return ""
+    lines = [line.strip() for line in normalize_text(local_text).splitlines() if line.strip()]
+    kept: list[str] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        cleaned = clean_value(line)
+        if not cleaned:
+            continue
+        normalized = normalize_search(cleaned)
+        key = re.sub(r"\s+", " ", normalized)
+        if key in seen:
+            continue
+        if is_useful_ocr_context_line(cleaned):
+            kept.append(cleaned)
+            seen.add(key)
+
+    compacted = "\n".join(kept)
+    if len(compacted) < min(900, max_chars // 2):
+        compacted = normalize_text(local_text)
+    return compacted[:max_chars]
+
+
+def is_useful_ocr_context_line(line: str) -> bool:
+    normalized = normalize_search(line)
+    if not normalized:
+        return False
+    if normalized.startswith("PASS "):
+        return True
+    if re.search(r"\b(?:NIK|NAMA|TEMPAT|LAHIR|JENIS|ALAMAT|RT/?RW|KEL/?DESA|KECAMATAN)\b", normalized):
+        return True
+    if re.search(r"\b(?:AGAMA|STATUS|PEKERJAAN|KEWARGANEGARAAN|BERLAKU|PROVINSI|KOTA|KABUPATEN)\b", normalized):
+        return True
+    if re.search(r"\b(?:SURAT IZIN MENGEMUDI|DRIVING LICEN[CS]E|SIM|INDONESIA)\b", normalized):
+        return True
+    if re.search(r"\b(?:ISLAM|KRISTEN|KATOLIK|HINDU|BUDDHA|KONGHUCU|WNI|SEUMUR HIDUP)\b", normalized):
+        return True
+    if re.search(r"\d{2}\D{1,3}\d{2}\D{1,3}\d{4}|\d{10,16}|\d{3}\s*[/\\-]\s*\d{3}", normalized):
+        return True
+    alpha_count = len(re.findall(r"[A-Za-z]", line))
+    symbol_count = len(re.findall(r"[^A-Za-z0-9\s.,:/\\'-]", line))
+    if 6 <= alpha_count <= 45 and symbol_count <= max(3, alpha_count // 4) and len(line) <= 80:
+        return True
+    return False
 
 
 def enhance_ai_crop(image: Image.Image) -> Image.Image:
@@ -1170,6 +1297,23 @@ def normalize_text(value: str) -> str:
 
 def normalize_search(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9/., -]", " ", value.upper())).strip()
+
+
+def env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return default
 
 
 def ensure_tesseract_data() -> Path:
