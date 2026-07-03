@@ -10,17 +10,62 @@ pipeline {
   environment {
     PIP_DISABLE_PIP_VERSION_CHECK = '1'
     PYTHONUNBUFFERED = '1'
-    NGINX_SITE_NAME = 'ocrid.wong.systems'
-    NGINX_SERVER_NAME = 'ocrid.wong.systems'
+    NODE_VERSION = '20.19.5'
+    PATH+LOCAL_NODE = "${WORKSPACE}/.jenkins/node/bin"
+    PROD_NGINX_SERVER_NAME = 'ocrid.wong.systems'
+    DEV_NGINX_SERVER_NAME = 'devocrid.wong.systems'
     OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
     WHATSAPP_UPSTREAM = 'http://127.0.0.1:3001'
   }
 
   stages {
-    stage('Tooling') {
+    stage('Bootstrap Tooling') {
       steps {
         sh '''
           set -eu
+
+          node_major() {
+            node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0
+          }
+
+          if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$(node_major)" -ge 18 ]; then
+            echo "Using system Node: $(command -v node)"
+          else
+            arch="$(uname -m)"
+            case "$arch" in
+              x86_64|amd64) node_arch="x64" ;;
+              aarch64|arm64) node_arch="arm64" ;;
+              *)
+                echo "Unsupported Jenkins agent architecture for bundled Node: $arch"
+                exit 1
+                ;;
+            esac
+
+            node_parent="${WORKSPACE}/.jenkins"
+            node_dir="${node_parent}/node-v${NODE_VERSION}-linux-${node_arch}"
+            node_link="${node_parent}/node"
+            tarball="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
+            url="https://nodejs.org/dist/v${NODE_VERSION}/${tarball}"
+
+            if [ ! -x "${node_dir}/bin/node" ]; then
+              echo "Installing Node ${NODE_VERSION} for ${node_arch} into ${node_dir}"
+              tmp_dir="$(mktemp -d)"
+              trap 'rm -rf "$tmp_dir"' EXIT
+              mkdir -p "$node_parent"
+              if command -v curl >/dev/null 2>&1; then
+                curl -fsSL "$url" -o "${tmp_dir}/${tarball}"
+              elif command -v wget >/dev/null 2>&1; then
+                wget -q "$url" -O "${tmp_dir}/${tarball}"
+              else
+                echo "curl or wget is required to bootstrap Node on this Jenkins agent."
+                exit 1
+              fi
+              tar -xJf "${tmp_dir}/${tarball}" -C "$node_parent"
+            fi
+
+            ln -sfn "$node_dir" "$node_link"
+          fi
+
           node --version
           npm --version
           python3 --version
@@ -99,16 +144,25 @@ pipeline {
               printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
             }
 
-            site_available="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
-            site_enabled="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}"
+            branch_name="${BRANCH_NAME:-}"
+            if [ "$branch_name" = "main" ] || [ "$branch_name" = "master" ]; then
+              nginx_server_name="${PROD_NGINX_SERVER_NAME}"
+            else
+              nginx_server_name="${DEV_NGINX_SERVER_NAME}"
+            fi
+
+            site_available="/etc/nginx/sites-available/${nginx_server_name}"
+            site_enabled="/etc/nginx/sites-enabled/${nginx_server_name}"
             tmp_file="$(mktemp)"
             trap 'rm -f "$tmp_file"' EXIT
+
+            echo "Configuring Nginx for branch '${branch_name:-unknown}' at ${nginx_server_name}"
 
             cat > "$tmp_file" <<NGINX
 server {
     listen 80;
     listen [::]:80;
-    server_name ${NGINX_SERVER_NAME};
+    server_name ${nginx_server_name};
 
     client_max_body_size 25m;
     proxy_read_timeout 300s;
