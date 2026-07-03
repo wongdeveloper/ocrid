@@ -291,6 +291,8 @@ else
   NPM_BIN="$node_link/bin/npm"
 fi
 
+NODE_BIN_DIR="$(dirname "$NODE_BIN")"
+export PATH="$NODE_BIN_DIR:$PATH"
 "$NPM_BIN" ci --omit=dev
 
 rm -rf .venv
