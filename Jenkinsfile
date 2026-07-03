@@ -98,13 +98,54 @@ pipeline {
 
     stage('Install Python') {
       steps {
-        sh '''
-          set -eu
-          rm -rf .venv
-          python3 -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt
-        '''
+        withCredentials([string(credentialsId: 'ocrid-sudo-password', variable: 'SUDO_PASSWORD')]) {
+          sh '''
+            set -eu
+
+            sudo_run() {
+              if [ "$(id -u)" -eq 0 ]; then
+                "$@"
+                return
+              fi
+
+              if [ -z "${SUDO_PASSWORD:-}" ]; then
+                echo "Jenkins credential 'ocrid-sudo-password' is empty or unavailable."
+                exit 1
+              fi
+
+              printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
+            }
+
+            venv_check_dir="$(mktemp -d)"
+            venv_check_log="$(mktemp)"
+            rm -rf "$venv_check_dir"
+            trap 'rm -rf "$venv_check_dir" "$venv_check_log"' EXIT
+
+            if ! python3 -m venv "$venv_check_dir" >"$venv_check_log" 2>&1; then
+              cat "$venv_check_log"
+
+              if ! command -v apt-get >/dev/null 2>&1; then
+                echo "python3 venv support is unavailable and this agent does not have apt-get."
+                exit 1
+              fi
+
+              python_minor="$(python3 - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+
+              sudo_run apt-get update
+              sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${python_minor}-venv" \
+                || sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+            fi
+
+            rm -rf .venv
+            python3 -m venv .venv
+            .venv/bin/python -m pip install --upgrade pip
+            .venv/bin/pip install -r requirements.txt
+          '''
+        }
       }
     }
 
