@@ -14,8 +14,6 @@ pipeline {
     LOCAL_NODE_BIN = "${WORKSPACE}/.jenkins/node/bin"
     PROD_NGINX_SERVER_NAME = 'ocrid.wong.systems'
     DEV_NGINX_SERVER_NAME = 'devocrid.wong.systems'
-    SUDO_SSH_HOST = '127.0.0.1'
-    SUDO_SSH_PORT = '22'
     OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
     WHATSAPP_UPSTREAM = 'http://127.0.0.1:3001'
   }
@@ -100,21 +98,22 @@ pipeline {
 
     stage('Install Python') {
       steps {
-        withCredentials([sshUserPrivateKey(credentialsId: 'ocrid-sudo-ssh', keyFileVariable: 'SUDO_SSH_KEY', usernameVariable: 'SUDO_SSH_USER')]) {
+        withCredentials([string(credentialsId: 'ocrid-sudo-password', variable: 'SUDO_PASSWORD')]) {
           sh '''
             set -eu
 
-            ssh_known_hosts="${WORKSPACE}/.jenkins/known_hosts"
-            mkdir -p "$(dirname "$ssh_known_hosts")"
-            ssh_target="${SUDO_SSH_USER}@${SUDO_SSH_HOST}"
+            sudo_run() {
+              if [ "$(id -u)" -eq 0 ]; then
+                "$@"
+                return
+              fi
 
-            ssh_sudo() {
-              ssh -i "$SUDO_SSH_KEY" \
-                -p "$SUDO_SSH_PORT" \
-                -o BatchMode=yes \
-                -o StrictHostKeyChecking=accept-new \
-                -o UserKnownHostsFile="$ssh_known_hosts" \
-                "$ssh_target" "sudo -n $*"
+              if [ -z "${SUDO_PASSWORD:-}" ]; then
+                echo "Jenkins credential 'ocrid-sudo-password' is empty or unavailable."
+                exit 1
+              fi
+
+              printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
             }
 
             venv_check_dir="$(mktemp -d)"
@@ -130,16 +129,15 @@ pipeline {
                 exit 1
               fi
 
-              ssh_sudo true
               python_minor="$(python3 - <<'PY'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )"
 
-              ssh_sudo apt-get update
-              ssh_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${python_minor}-venv" \
-                || ssh_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+              sudo_run apt-get update
+              sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${python_minor}-venv" \
+                || sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
             fi
 
             rm -rf .venv
@@ -177,34 +175,28 @@ PY
 
     stage('Configure Nginx') {
       steps {
-        withCredentials([sshUserPrivateKey(credentialsId: 'ocrid-sudo-ssh', keyFileVariable: 'SUDO_SSH_KEY', usernameVariable: 'SUDO_SSH_USER')]) {
+        withCredentials([string(credentialsId: 'ocrid-sudo-password', variable: 'SUDO_PASSWORD')]) {
           sh '''
             set -eu
 
-            ssh_known_hosts="${WORKSPACE}/.jenkins/known_hosts"
-            mkdir -p "$(dirname "$ssh_known_hosts")"
-            ssh_target="${SUDO_SSH_USER}@${SUDO_SSH_HOST}"
+            if ! command -v nginx >/dev/null 2>&1; then
+              echo "nginx is not installed on this Jenkins agent."
+              exit 1
+            fi
 
-            ssh_run() {
-              ssh -i "$SUDO_SSH_KEY" \
-                -p "$SUDO_SSH_PORT" \
-                -o BatchMode=yes \
-                -o StrictHostKeyChecking=accept-new \
-                -o UserKnownHostsFile="$ssh_known_hosts" \
-                "$ssh_target" "$@"
+            sudo_run() {
+              if [ "$(id -u)" -eq 0 ]; then
+                "$@"
+                return
+              fi
+
+              if [ -z "${SUDO_PASSWORD:-}" ]; then
+                echo "Jenkins credential 'ocrid-sudo-password' is empty or unavailable."
+                exit 1
+              fi
+
+              printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
             }
-
-            scp_to_host() {
-              scp -i "$SUDO_SSH_KEY" \
-                -P "$SUDO_SSH_PORT" \
-                -o BatchMode=yes \
-                -o StrictHostKeyChecking=accept-new \
-                -o UserKnownHostsFile="$ssh_known_hosts" \
-                "$1" "${ssh_target}:$2"
-            }
-
-            ssh_run 'sudo -n true'
-            ssh_run 'command -v nginx >/dev/null 2>&1 || { echo "nginx is not installed on the deploy host."; exit 1; }'
 
             branch_name="${BRANCH_NAME:-}"
             if [ "$branch_name" = "main" ] || [ "$branch_name" = "master" ]; then
@@ -216,7 +208,6 @@ PY
             site_available="/etc/nginx/sites-available/${nginx_server_name}"
             site_enabled="/etc/nginx/sites-enabled/${nginx_server_name}"
             tmp_file="$(mktemp)"
-            remote_tmp="$(ssh_run 'mktemp')"
             trap 'rm -f "$tmp_file"' EXIT
 
             echo "Configuring Nginx for branch '${branch_name:-unknown}' at ${nginx_server_name}"
@@ -255,14 +246,18 @@ server {
 }
 NGINX
 
-            scp_to_host "$tmp_file" "$remote_tmp"
-            ssh_run "sudo -n install -d /etc/nginx/sites-available /etc/nginx/sites-enabled"
-            ssh_run "sudo -n install -m 0644 '$remote_tmp' '$site_available'"
-            ssh_run "sudo -n ln -sfn '$site_available' '$site_enabled'"
-            ssh_run "sudo -n nginx -t"
+            sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+            sudo_run install -m 0644 "$tmp_file" "$site_available"
+            sudo_run ln -sfn "$site_available" "$site_enabled"
+            sudo_run nginx -t
 
-            ssh_run "if command -v systemctl >/dev/null 2>&1; then sudo -n systemctl reload nginx; elif command -v service >/dev/null 2>&1; then sudo -n service nginx reload; else sudo -n nginx -s reload; fi"
-            ssh_run "rm -f '$remote_tmp'"
+            if command -v systemctl >/dev/null 2>&1; then
+              sudo_run systemctl reload nginx
+            elif command -v service >/dev/null 2>&1; then
+              sudo_run service nginx reload
+            else
+              sudo_run nginx -s reload
+            fi
           '''
         }
       }
