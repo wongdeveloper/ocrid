@@ -173,7 +173,17 @@ Jenkins agent requirements:
 - Python 3.12 or newer
 - Nginx installed when the deployment stage runs
 - `curl` or `wget` if Node.js 18+ is not already installed. The pipeline bootstraps Node.js 20 into the Jenkins workspace when system Node is missing.
-- A Jenkins **Secret text** credential with ID `ocrid-sudo-password`, containing the sudo password for the Jenkins agent user. The pipeline passes this to `sudo -S` for installing missing `python3-venv` support on apt-based agents, creating the branch-specific Nginx site, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx.
+- A Jenkins **SSH Username with private key** credential with ID `ocrid-sudo-ssh`. The SSH user must be able to run `sudo -n` without a password on the Jenkins/deploy host. The pipeline uses this credential for installing missing `python3-venv` support on apt-based agents, creating the branch-specific Nginx site, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx.
+
+For example, create a sudoers rule with `visudo`:
+
+```bash
+deploy ALL=(root) NOPASSWD: ALL
+```
+
+Replace `deploy` with the SSH username stored in the `ocrid-sudo-ssh` Jenkins credential.
+
+By default, privileged commands SSH to `127.0.0.1:22`. Change `SUDO_SSH_HOST` and `SUDO_SSH_PORT` in `Jenkinsfile` if Jenkins deploys to a different host.
 
 Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 
