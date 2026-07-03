@@ -176,6 +176,9 @@ Jenkins agent requirements:
 - Jenkins SSH Agent plugin, with **SSH Username with private key** credentials:
   - `ocrid-dev-ssh` for `DEV1` deployments to `devocrid.wong.systems`
   - `ocrid-prod-ssh` for `main`/`master` deployments to `ocrid.wong.systems`
+- Jenkins Credentials Binding plugin, with **Secret file** credentials containing the full `.env` file:
+  - `ocrid-dev-env` for `DEV1`
+  - `ocrid-prod-env` for `main`/`master`
 - The SSH credential username should match `DEV_DEPLOY_USER` or `PROD_DEPLOY_USER` in `Jenkinsfile`, currently `deploy`.
 
 Target server requirements:
@@ -211,9 +214,9 @@ Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 - Branch specifier: `*/DEV1`
 - Script path: `Jenkinsfile`
 
-Do not commit `.env`. The deployment excludes `.env`, so keep production secrets such as `OPENAI_API_KEY`, WhatsApp keys, and bridge API keys in the target app directory's `.env` file or inject them through Jenkins-controlled deployment environment variables.
+Do not commit `.env`. The deployment excludes `.env` from source sync, then uploads the branch-specific Jenkins Secret file credential to the target app directory as `.env` with `0600` permissions. Store production secrets such as `OPENAI_API_KEY`, WhatsApp keys, and bridge API keys in `ocrid-dev-env` or `ocrid-prod-env`.
 
-The deployment stages connect with `sshagent`, sync the app, install dependencies, create or update systemd services, restart the OCR API and WhatsApp worker, and wait for both local health endpoints before configuring Nginx. The Nginx stage copies a generated config to the target server, then uses remote `sudo -n` to create the matching file under `/etc/nginx/sites-available`, enable it in `/etc/nginx/sites-enabled`, validate with `nginx -t`, and reload Nginx. `DEV1` deploys to `devocrid.wong.systems`; `main`/`master` deploys to `ocrid.wong.systems`. Other branches run tests but skip deployment. The config proxies `/` to the OCR API on `127.0.0.1:6017` and `/whatsapp/` to the WhatsApp worker on `127.0.0.1:3001`. Configure TLS separately with Certbot or your preferred certificate automation.
+The deployment stages connect with `sshagent`, sync the app, upload `.env` from Jenkins credentials, install dependencies, create or update systemd services, restart the OCR API and WhatsApp worker, and wait for both local health endpoints before configuring Nginx. The Nginx stage copies a generated config to the target server, then uses remote `sudo -n` to create the matching file under `/etc/nginx/sites-available`, enable it in `/etc/nginx/sites-enabled`, validate with `nginx -t`, and reload Nginx. `DEV1` deploys to `devocrid.wong.systems`; `main`/`master` deploys to `ocrid.wong.systems`. Other branches run tests but skip deployment. The config proxies `/` to the OCR API on `127.0.0.1:6017` and `/whatsapp/` to the WhatsApp worker on `127.0.0.1:3001`. Configure TLS separately with Certbot or your preferred certificate automation.
 
 ## Run Automatically On Mac
 

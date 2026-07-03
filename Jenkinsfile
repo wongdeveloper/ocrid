@@ -26,6 +26,8 @@ pipeline {
     PROD_WHATSAPP_SERVICE = 'ocrid-whatsapp'
     DEV_SSH_CREDENTIALS = 'ocrid-dev-ssh'
     PROD_SSH_CREDENTIALS = 'ocrid-prod-ssh'
+    DEV_ENV_CREDENTIALS = 'ocrid-dev-env'
+    PROD_ENV_CREDENTIALS = 'ocrid-prod-env'
     PROD_NGINX_SERVER_NAME = 'ocrid.wong.systems'
     DEV_NGINX_SERVER_NAME = 'devocrid.wong.systems'
     OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
@@ -185,6 +187,7 @@ pipeline {
           def apiService = isProd ? env.PROD_API_SERVICE : env.DEV_API_SERVICE
           def whatsappService = isProd ? env.PROD_WHATSAPP_SERVICE : env.DEV_WHATSAPP_SERVICE
           def sshCredential = isProd ? env.PROD_SSH_CREDENTIALS : env.DEV_SSH_CREDENTIALS
+          def envCredential = isProd ? env.PROD_ENV_CREDENTIALS : env.DEV_ENV_CREDENTIALS
 
           withEnv([
             "DEPLOY_USER=${deployUser}",
@@ -194,7 +197,8 @@ pipeline {
             "WHATSAPP_SERVICE=${whatsappService}",
           ]) {
             sshagent(credentials: [sshCredential]) {
-              sh(script: '''#!/usr/bin/env bash
+              withCredentials([file(credentialsId: envCredential, variable: 'DEPLOY_ENV_FILE')]) {
+                sh(script: '''#!/usr/bin/env bash
                 set -euo pipefail
 
                 ssh_opts=(-o StrictHostKeyChecking=no)
@@ -214,6 +218,10 @@ pipeline {
                   --exclude .wwebjs_auth \
                   --exclude .wwebjs_cache \
                   ./ "$remote:$APP_DIR/"
+
+                env_remote_tmp="${APP_DIR}/.env.jenkins.$$"
+                scp "${ssh_opts[@]}" "$DEPLOY_ENV_FILE" "$remote:$env_remote_tmp"
+                ssh "${ssh_opts[@]}" "$remote" "mv '$env_remote_tmp' '$APP_DIR/.env' && chmod 600 '$APP_DIR/.env'"
 
                 ssh "${ssh_opts[@]}" "$remote" \
                   "APP_DIR='$APP_DIR' NODE_VERSION='$NODE_VERSION' API_SERVICE='$API_SERVICE' WHATSAPP_SERVICE='$WHATSAPP_SERVICE' DEPLOY_USER='$DEPLOY_USER' /bin/bash -s" <<'EOF'
@@ -432,7 +440,8 @@ wait_for_active "WhatsApp worker" "$WHATSAPP_SERVICE.service"
 wait_for_health "OCR API" "http://127.0.0.1:6017/health" "$API_SERVICE.service"
 wait_for_health "WhatsApp worker" "http://127.0.0.1:3001/health" "$WHATSAPP_SERVICE.service"
 EOF
-              ''')
+                ''')
+              }
             }
           }
         }
