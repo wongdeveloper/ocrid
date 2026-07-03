@@ -171,9 +171,12 @@ npm run test:whatsapp-web
 Jenkins agent requirements:
 
 - Python 3.12 or newer
-- Nginx installed when the deployment stage runs
 - `curl` or `wget` if Node.js 18+ is not already installed. The pipeline bootstraps Node.js 20 into the Jenkins workspace when system Node is missing.
-- A Jenkins **Secret text** credential with ID `ocrid-sudo-password`, containing the sudo password for the Jenkins agent user. The pipeline passes this to `sudo -S` only for creating the branch-specific Nginx site, linking it into `/etc/nginx/sites-enabled`, validating with `nginx -t`, and reloading Nginx.
+- Jenkins SSH Agent plugin, with **SSH Username with private key** credentials:
+  - `ocrid-dev-ssh` for `DEV1` deployments to `devocrid.wong.systems`
+  - `ocrid-prod-ssh` for `main`/`master` deployments to `ocrid.wong.systems`
+- The SSH credential username should match `DEPLOY_USER` in `Jenkinsfile`, currently `deploy`.
+- Nginx installed on the target server. The deploy user must be able to run `sudo -n` for Nginx setup/reload without an interactive password.
 
 If `python3 -m venv` is unavailable on the Jenkins agent, the pipeline downloads PyPA `virtualenv.pyz` into the workspace and creates `.venv` without sudo.
 
@@ -186,7 +189,7 @@ Create a Jenkins Pipeline job with **Pipeline script from SCM**:
 
 Do not commit `.env`. Configure production secrets such as `OPENAI_API_KEY`, WhatsApp keys, and bridge API keys through Jenkins credentials or deployment environment variables.
 
-The Nginx stage maps `main`/`master` to `ocrid.wong.systems` and all other branches, including `DEV1`, to `devocrid.wong.systems`. It creates the matching file under `/etc/nginx/sites-available`, enables the same name in `/etc/nginx/sites-enabled`, proxies `/` to the OCR API on `127.0.0.1:6017`, and proxies `/whatsapp/` to the WhatsApp worker on `127.0.0.1:3001`. Configure TLS separately with Certbot or your preferred certificate automation.
+The Nginx stage connects with `sshagent`, copies a generated Nginx config to the target server, then uses remote `sudo -n` to create the matching file under `/etc/nginx/sites-available`, enable it in `/etc/nginx/sites-enabled`, validate with `nginx -t`, and reload Nginx. `DEV1` deploys to `devocrid.wong.systems`; `main`/`master` deploys to `ocrid.wong.systems`. Other branches run tests but skip Nginx deployment. The config proxies `/` to the OCR API on `127.0.0.1:6017` and `/whatsapp/` to the WhatsApp worker on `127.0.0.1:3001`. Configure TLS separately with Certbot or your preferred certificate automation.
 
 ## Run Automatically On Mac
 

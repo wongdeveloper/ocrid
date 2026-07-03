@@ -12,6 +12,13 @@ pipeline {
     PYTHONUNBUFFERED = '1'
     NODE_VERSION = '20.19.5'
     LOCAL_NODE_BIN = "${WORKSPACE}/.jenkins/node/bin"
+    DEPLOY_USER = 'deploy'
+    DEV_BRANCH = 'DEV1'
+    PROD_BRANCH = 'main'
+    DEV_DEPLOY_HOST = 'devocrid.wong.systems'
+    PROD_DEPLOY_HOST = 'ocrid.wong.systems'
+    DEV_SSH_CREDENTIALS = 'ocrid-dev-ssh'
+    PROD_SSH_CREDENTIALS = 'ocrid-prod-ssh'
     PROD_NGINX_SERVER_NAME = 'ocrid.wong.systems'
     DEV_NGINX_SERVER_NAME = 'devocrid.wong.systems'
     OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
@@ -153,45 +160,38 @@ pipeline {
     }
 
     stage('Configure Nginx') {
+      when {
+        expression {
+          def branchName = env.BRANCH_NAME ?: ''
+          return branchName.equalsIgnoreCase(env.DEV_BRANCH) ||
+            branchName.equalsIgnoreCase(env.PROD_BRANCH) ||
+            branchName.equalsIgnoreCase('master')
+        }
+      }
       steps {
-        withCredentials([string(credentialsId: 'ocrid-sudo-password', variable: 'SUDO_PASSWORD')]) {
-          sh '''
-            set -eu
+        script {
+          def branchName = env.BRANCH_NAME ?: ''
+          def isProd = branchName.equalsIgnoreCase(env.PROD_BRANCH) || branchName.equalsIgnoreCase('master')
+          def deployHost = isProd ? env.PROD_DEPLOY_HOST : env.DEV_DEPLOY_HOST
+          def nginxServerName = isProd ? env.PROD_NGINX_SERVER_NAME : env.DEV_NGINX_SERVER_NAME
+          def sshCredential = isProd ? env.PROD_SSH_CREDENTIALS : env.DEV_SSH_CREDENTIALS
 
-            if ! command -v nginx >/dev/null 2>&1; then
-              echo "nginx is not installed on this Jenkins agent."
-              exit 1
-            fi
+          withEnv([
+            "DEPLOY_HOST=${deployHost}",
+            "NGINX_SERVER_NAME=${nginxServerName}",
+          ]) {
+            sshagent(credentials: [sshCredential]) {
+              sh(script: '''#!/usr/bin/env bash
+                set -euo pipefail
 
-            sudo_run() {
-              if [ "$(id -u)" -eq 0 ]; then
-                "$@"
-                return
-              fi
+                site_available="/etc/nginx/sites-available/${NGINX_SERVER_NAME}"
+                site_enabled="/etc/nginx/sites-enabled/${NGINX_SERVER_NAME}"
+                tmp_file="$(mktemp)"
+                trap 'rm -f "$tmp_file"' EXIT
 
-              if [ -z "${SUDO_PASSWORD:-}" ]; then
-                echo "Jenkins credential 'ocrid-sudo-password' is empty or unavailable."
-                exit 1
-              fi
+                echo "Configuring Nginx for branch '${BRANCH_NAME:-unknown}' at ${NGINX_SERVER_NAME} on ${DEPLOY_HOST}"
 
-              printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
-            }
-
-            branch_name="${BRANCH_NAME:-}"
-            if [ "$branch_name" = "main" ] || [ "$branch_name" = "master" ]; then
-              nginx_server_name="${PROD_NGINX_SERVER_NAME}"
-            else
-              nginx_server_name="${DEV_NGINX_SERVER_NAME}"
-            fi
-
-            site_available="/etc/nginx/sites-available/${nginx_server_name}"
-            site_enabled="/etc/nginx/sites-enabled/${nginx_server_name}"
-            tmp_file="$(mktemp)"
-            trap 'rm -f "$tmp_file"' EXIT
-
-            echo "Configuring Nginx for branch '${branch_name:-unknown}' at ${nginx_server_name}"
-
-            cat > "$tmp_file" <<'NGINX'
+                cat > "$tmp_file" <<'NGINX'
 server {
     listen 80;
     listen [::]:80;
@@ -225,7 +225,7 @@ server {
 }
 NGINX
 
-            python3 - "$tmp_file" "$nginx_server_name" "$WHATSAPP_UPSTREAM" "$OCR_API_UPSTREAM" <<'PY'
+                python3 - "$tmp_file" "$NGINX_SERVER_NAME" "$WHATSAPP_UPSTREAM" "$OCR_API_UPSTREAM" <<'PY'
 from pathlib import Path
 import sys
 
@@ -241,19 +241,41 @@ for needle, value in replacements.items():
 path.write_text(text)
 PY
 
-            sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
-            sudo_run install -m 0644 "$tmp_file" "$site_available"
-            sudo_run ln -sfn "$site_available" "$site_enabled"
-            sudo_run nginx -t
+                ssh_opts=(-o StrictHostKeyChecking=no)
+                remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+                remote_tmp="$(ssh "${ssh_opts[@]}" "$remote" 'mktemp')"
 
-            if command -v systemctl >/dev/null 2>&1; then
-              sudo_run systemctl reload nginx
-            elif command -v service >/dev/null 2>&1; then
-              sudo_run service nginx reload
-            else
-              sudo_run nginx -s reload
-            fi
-          '''
+                scp "${ssh_opts[@]}" "$tmp_file" "$remote:$remote_tmp"
+
+                ssh "${ssh_opts[@]}" "$remote" \
+                  "SITE_AVAILABLE='$site_available' SITE_ENABLED='$site_enabled' REMOTE_TMP='$remote_tmp' /bin/bash -s" <<'EOF'
+set -euo pipefail
+
+sudo -n true
+
+if ! command -v nginx >/dev/null 2>&1; then
+  echo "nginx is not installed on the target server."
+  exit 1
+fi
+
+sudo -n install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+sudo -n install -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
+sudo -n ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
+sudo -n nginx -t
+
+if command -v systemctl >/dev/null 2>&1; then
+  sudo -n systemctl reload nginx
+elif command -v service >/dev/null 2>&1; then
+  sudo -n service nginx reload
+else
+  sudo -n nginx -s reload
+fi
+
+rm -f "$REMOTE_TMP"
+EOF
+              ''')
+            }
+          }
         }
       }
     }
