@@ -258,36 +258,43 @@ sudo_run() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
   else
-    sudo -n "$@"
+    if ! output="$(sudo -n "$@" 2>&1)"; then
+      status=$?
+      printf '%s\n' "$output"
+      echo "Remote user '$(id -un)' cannot run this command with passwordless sudo: $*"
+      echo "Use command -v on the target server and allow those exact paths in sudoers."
+      return "$status"
+    fi
+    printf '%s\n' "$output"
   fi
 }
 
-if [ "$(id -u)" -ne 0 ] && ! sudo -n -v >/tmp/ocrid-sudo-check.log 2>&1; then
-  echo "Remote user '$(id -un)' cannot run passwordless sudo on this server."
-  cat /tmp/ocrid-sudo-check.log
-  echo "Fix on the target server with: deploy ALL=(root) NOPASSWD: ALL"
-  echo "Alternatively set DEV_DEPLOY_USER/PROD_DEPLOY_USER to root and use a root SSH credential."
-  exit 1
-fi
+require_cmd() {
+  command -v "$1" || {
+    echo "$1 is not installed on the target server."
+    exit 1
+  }
+}
 
-trap 'rm -f "$REMOTE_TMP" /tmp/ocrid-sudo-check.log' EXIT
+INSTALL_BIN="$(require_cmd install)"
+LN_BIN="$(require_cmd ln)"
+NGINX_BIN="$(require_cmd nginx)"
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+SERVICE_BIN="$(command -v service || true)"
 
-if ! command -v nginx >/dev/null 2>&1; then
-  echo "nginx is not installed on the target server."
-  exit 1
-fi
+trap 'rm -f "$REMOTE_TMP"' EXIT
 
-sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
-sudo_run install -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
-sudo_run ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
-sudo_run nginx -t
+sudo_run "$INSTALL_BIN" -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+sudo_run "$INSTALL_BIN" -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
+sudo_run "$LN_BIN" -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
+sudo_run "$NGINX_BIN" -t
 
-if command -v systemctl >/dev/null 2>&1; then
-  sudo_run systemctl reload nginx
-elif command -v service >/dev/null 2>&1; then
-  sudo_run service nginx reload
+if [ -n "$SYSTEMCTL_BIN" ]; then
+  sudo_run "$SYSTEMCTL_BIN" reload nginx
+elif [ -n "$SERVICE_BIN" ]; then
+  sudo_run "$SERVICE_BIN" nginx reload
 else
-  sudo_run nginx -s reload
+  sudo_run "$NGINX_BIN" -s reload
 fi
 EOF
               ''')

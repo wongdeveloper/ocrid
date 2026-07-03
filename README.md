@@ -181,9 +181,15 @@ Jenkins agent requirements:
 For a `deploy` user, configure passwordless sudo on each target server:
 
 ```bash
-echo 'deploy ALL=(root) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/ocrid-deploy
+echo 'deploy ALL=(root) NOPASSWD: /usr/bin/install, /usr/bin/ln, /usr/sbin/nginx, /bin/systemctl, /usr/bin/systemctl, /usr/sbin/service, /usr/bin/service' | sudo tee /etc/sudoers.d/ocrid-deploy
 sudo chmod 0440 /etc/sudoers.d/ocrid-deploy
 sudo visudo -cf /etc/sudoers.d/ocrid-deploy
+```
+
+The pipeline resolves the exact command paths on the target server with `command -v`. If your server uses different paths, update `/etc/sudoers.d/ocrid-deploy` to match:
+
+```bash
+command -v install ln nginx systemctl service
 ```
 
 If you prefer root SSH, set `DEV_DEPLOY_USER` and/or `PROD_DEPLOY_USER` to `root` in `Jenkinsfile` and store the matching root private key in the Jenkins SSH credential.
