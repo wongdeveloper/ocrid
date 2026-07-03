@@ -191,39 +191,55 @@ pipeline {
 
             echo "Configuring Nginx for branch '${branch_name:-unknown}' at ${nginx_server_name}"
 
-            cat > "$tmp_file" <<NGINX
+            cat > "$tmp_file" <<'NGINX'
 server {
     listen 80;
     listen [::]:80;
-    server_name ${nginx_server_name};
+    server_name __NGINX_SERVER_NAME__;
 
     client_max_body_size 25m;
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
 
     location /whatsapp/ {
-        proxy_pass ${WHATSAPP_UPSTREAM};
+        proxy_pass __WHATSAPP_UPSTREAM__;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
     location / {
-        proxy_pass ${OCR_API_UPSTREAM};
+        proxy_pass __OCR_API_UPSTREAM__;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 }
 NGINX
+
+            python3 - "$tmp_file" "$nginx_server_name" "$WHATSAPP_UPSTREAM" "$OCR_API_UPSTREAM" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+replacements = {
+    "__NGINX_SERVER_NAME__": sys.argv[2],
+    "__WHATSAPP_UPSTREAM__": sys.argv[3],
+    "__OCR_API_UPSTREAM__": sys.argv[4],
+}
+text = path.read_text()
+for needle, value in replacements.items():
+    text = text.replace(needle, value)
+path.write_text(text)
+PY
 
             sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
             sudo_run install -m 0644 "$tmp_file" "$site_available"
