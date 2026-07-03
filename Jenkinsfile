@@ -11,7 +11,7 @@ pipeline {
     PIP_DISABLE_PIP_VERSION_CHECK = '1'
     PYTHONUNBUFFERED = '1'
     NODE_VERSION = '20.19.5'
-    PATH+LOCAL_NODE = "${WORKSPACE}/.jenkins/node/bin"
+    LOCAL_NODE_BIN = "${WORKSPACE}/.jenkins/node/bin"
     PROD_NGINX_SERVER_NAME = 'ocrid.wong.systems'
     DEV_NGINX_SERVER_NAME = 'devocrid.wong.systems'
     OCR_API_UPSTREAM = 'http://127.0.0.1:6017'
@@ -23,6 +23,7 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export PATH="${LOCAL_NODE_BIN}:$PATH"
 
           node_major() {
             node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0
@@ -87,7 +88,11 @@ pipeline {
 
     stage('Install Node') {
       steps {
-        sh 'npm ci'
+        sh '''
+          set -eu
+          export PATH="${LOCAL_NODE_BIN}:$PATH"
+          npm ci
+        '''
       }
     }
 
@@ -107,13 +112,21 @@ pipeline {
       parallel {
         stage('Python Unit Tests') {
           steps {
-            sh 'npm run test:python'
+            sh '''
+              set -eu
+              export PATH="${LOCAL_NODE_BIN}:$PATH"
+              npm run test:python
+            '''
           }
         }
 
         stage('WhatsApp Worker Syntax') {
           steps {
-            sh 'npm run test:whatsapp-web'
+            sh '''
+              set -eu
+              export PATH="${LOCAL_NODE_BIN}:$PATH"
+              npm run test:whatsapp-web
+            '''
           }
         }
       }
