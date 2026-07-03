@@ -12,9 +12,10 @@ pipeline {
     PYTHONUNBUFFERED = '1'
     NODE_VERSION = '20.19.5'
     LOCAL_NODE_BIN = "${WORKSPACE}/.jenkins/node/bin"
-    DEPLOY_USER = 'deploy'
     DEV_BRANCH = 'DEV1'
     PROD_BRANCH = 'main'
+    DEV_DEPLOY_USER = 'deploy'
+    PROD_DEPLOY_USER = 'deploy'
     DEV_DEPLOY_HOST = 'devocrid.wong.systems'
     PROD_DEPLOY_HOST = 'ocrid.wong.systems'
     DEV_SSH_CREDENTIALS = 'ocrid-dev-ssh'
@@ -173,10 +174,12 @@ pipeline {
           def branchName = env.BRANCH_NAME ?: ''
           def isProd = branchName.equalsIgnoreCase(env.PROD_BRANCH) || branchName.equalsIgnoreCase('master')
           def deployHost = isProd ? env.PROD_DEPLOY_HOST : env.DEV_DEPLOY_HOST
+          def deployUser = isProd ? env.PROD_DEPLOY_USER : env.DEV_DEPLOY_USER
           def nginxServerName = isProd ? env.PROD_NGINX_SERVER_NAME : env.DEV_NGINX_SERVER_NAME
           def sshCredential = isProd ? env.PROD_SSH_CREDENTIALS : env.DEV_SSH_CREDENTIALS
 
           withEnv([
+            "DEPLOY_USER=${deployUser}",
             "DEPLOY_HOST=${deployHost}",
             "NGINX_SERVER_NAME=${nginxServerName}",
           ]) {
@@ -251,27 +254,41 @@ PY
                   "SITE_AVAILABLE='$site_available' SITE_ENABLED='$site_enabled' REMOTE_TMP='$remote_tmp' /bin/bash -s" <<'EOF'
 set -euo pipefail
 
-sudo -n true
+sudo_run() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+if [ "$(id -u)" -ne 0 ] && ! sudo -n -v >/tmp/ocrid-sudo-check.log 2>&1; then
+  echo "Remote user '$(id -un)' cannot run passwordless sudo on this server."
+  cat /tmp/ocrid-sudo-check.log
+  echo "Fix on the target server with: deploy ALL=(root) NOPASSWD: ALL"
+  echo "Alternatively set DEV_DEPLOY_USER/PROD_DEPLOY_USER to root and use a root SSH credential."
+  exit 1
+fi
+
+trap 'rm -f "$REMOTE_TMP" /tmp/ocrid-sudo-check.log' EXIT
 
 if ! command -v nginx >/dev/null 2>&1; then
   echo "nginx is not installed on the target server."
   exit 1
 fi
 
-sudo -n install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
-sudo -n install -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
-sudo -n ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
-sudo -n nginx -t
+sudo_run install -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+sudo_run install -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
+sudo_run ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
+sudo_run nginx -t
 
 if command -v systemctl >/dev/null 2>&1; then
-  sudo -n systemctl reload nginx
+  sudo_run systemctl reload nginx
 elif command -v service >/dev/null 2>&1; then
-  sudo -n service nginx reload
+  sudo_run service nginx reload
 else
-  sudo -n nginx -s reload
+  sudo_run nginx -s reload
 fi
-
-rm -f "$REMOTE_TMP"
 EOF
               ''')
             }

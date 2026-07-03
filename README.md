@@ -175,8 +175,18 @@ Jenkins agent requirements:
 - Jenkins SSH Agent plugin, with **SSH Username with private key** credentials:
   - `ocrid-dev-ssh` for `DEV1` deployments to `devocrid.wong.systems`
   - `ocrid-prod-ssh` for `main`/`master` deployments to `ocrid.wong.systems`
-- The SSH credential username should match `DEPLOY_USER` in `Jenkinsfile`, currently `deploy`.
-- Nginx installed on the target server. The deploy user must be able to run `sudo -n` for Nginx setup/reload without an interactive password.
+- The SSH credential username should match `DEV_DEPLOY_USER` or `PROD_DEPLOY_USER` in `Jenkinsfile`, currently `deploy`.
+- Nginx installed on the target server. If the deploy user is not `root`, it must be able to run `sudo -n` for Nginx setup/reload without an interactive password.
+
+For a `deploy` user, configure passwordless sudo on each target server:
+
+```bash
+echo 'deploy ALL=(root) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/ocrid-deploy
+sudo chmod 0440 /etc/sudoers.d/ocrid-deploy
+sudo visudo -cf /etc/sudoers.d/ocrid-deploy
+```
+
+If you prefer root SSH, set `DEV_DEPLOY_USER` and/or `PROD_DEPLOY_USER` to `root` in `Jenkinsfile` and store the matching root private key in the Jenkins SSH credential.
 
 If `python3 -m venv` is unavailable on the Jenkins agent, the pipeline downloads PyPA `virtualenv.pyz` into the workspace and creates `.venv` without sudo.
 
