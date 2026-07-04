@@ -18,6 +18,7 @@ const SESSION_PATH = path.resolve(process.env.WHATSAPP_WEB_SESSION_PATH || ".wwe
 const OCR_API_URL = (process.env.OCR_API_URL || "http://127.0.0.1:6017").replace(/\/$/, "");
 const API_KEY = process.env.WHATSAPP_BRIDGE_API_KEY || "";
 const ALLOW_GROUPS = process.env.WHATSAPP_WEB_ALLOW_GROUPS === "true";
+const PROCESS_OWN_MESSAGES = process.env.WHATSAPP_WEB_PROCESS_OWN_MESSAGES === "true";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const OCR_TIMEOUT_MS = 180_000;
 
@@ -31,6 +32,14 @@ const state = {
   readyAt: null,
   lastQrAt: null,
   lastError: null,
+  lastMessage: null,
+  messageStats: {
+    events: 0,
+    ignored: 0,
+    processed: 0,
+    ocrSucceeded: 0,
+    ocrFailed: 0,
+  },
 };
 
 const processedMessages = new Set();
@@ -82,7 +91,11 @@ client.on("disconnected", (reason) => {
 });
 
 client.on("message", (message) => {
-  void handleIncomingMessage(message);
+  void handleIncomingMessage(message, "message");
+});
+
+client.on("message_create", (message) => {
+  void handleIncomingMessage(message, "message_create");
 });
 
 app.get("/health", (_request, response) => {
@@ -162,43 +175,75 @@ client.initialize().catch((error) => {
   console.error("Failed to initialize WhatsApp Web:", error);
 });
 
-async function handleIncomingMessage(message) {
+async function handleIncomingMessage(message, source = "message") {
   const messageId = message.id?._serialized;
-  if (!messageId || message.fromMe || message.from === "status@broadcast" || processedMessages.has(messageId)) {
+  recordMessage(message, source, "received");
+
+  if (!messageId) {
+    ignoreMessage(message, source, "missing_message_id");
+    return;
+  }
+  if (message.from === "status@broadcast") {
+    ignoreMessage(message, source, "status_broadcast");
+    return;
+  }
+  if (processedMessages.has(messageId)) {
+    state.messageStats.ignored += 1;
+    console.log(`Ignoring WhatsApp message ${messageId} from ${maskChatId(message.from)}: duplicate_event`);
+    return;
+  }
+  if (message.fromMe && (!PROCESS_OWN_MESSAGES || !message.hasMedia)) {
+    const reason = PROCESS_OWN_MESSAGES ? "own_non_media_message" : "from_me_disabled";
+    state.messageStats.ignored += 1;
+    console.log(`Ignoring WhatsApp message ${messageId} from ${maskChatId(message.from)}: ${reason}`);
     return;
   }
   rememberMessage(messageId);
 
-  if (!ALLOW_GROUPS && message.from.endsWith("@g.us")) {
+  if (!ALLOW_GROUPS && String(message.from || "").endsWith("@g.us")) {
+    ignoreMessage(message, source, "group_messages_disabled");
     return;
   }
 
   if (!message.hasMedia) {
+    ignoreMessage(message, source, "no_media");
     await safeReply(message, "Kirim foto KTP atau SIM sebagai gambar untuk diproses otomatis.");
     return;
   }
 
   try {
+    recordMessage(message, source, "downloading_media");
     const media = await message.downloadMedia();
     if (!media?.data || !media.mimetype?.startsWith("image/")) {
+      ignoreMessage(message, source, `unsupported_media:${media?.mimetype || "unknown"}`);
       await safeReply(message, "File tersebut bukan gambar. Kirim foto KTP atau SIM dalam format gambar.");
       return;
     }
 
     const image = Buffer.from(media.data, "base64");
     if (image.length > MAX_IMAGE_BYTES) {
+      ignoreMessage(message, source, "image_too_large");
       await safeReply(message, "Ukuran gambar melebihi batas 20 MB.");
       return;
     }
 
+    recordMessage(message, source, "processing_ocr", { mimetype: media.mimetype, imageBytes: image.length });
     const result = await extractIdentityDocument(image, media.mimetype, media.filename);
     let reply = result.formattedText;
     if (Array.isArray(result.warnings) && result.warnings.length > 0) {
       reply += `\n\nPerlu diperiksa:\n- ${result.warnings.join("\n- ")}`;
     }
     await safeReply(message, reply);
+    state.messageStats.processed += 1;
+    state.messageStats.ocrSucceeded += 1;
+    recordMessage(message, source, "processed", {
+      documentType: result.documentType || result.fields?.documentType || "UNKNOWN",
+      engine: result.engine || null,
+    });
   } catch (error) {
     state.lastError = error.message;
+    state.messageStats.ocrFailed += 1;
+    recordMessage(message, source, "failed", { error: error.message });
     console.error(`Failed to process WhatsApp message ${messageId}:`, error);
     await safeReply(
       message,
@@ -278,6 +323,7 @@ function statusPayload() {
     qrUrl: activeQr ? `http://${HOST}:${PORT}/whatsapp/qr.svg` : null,
     ocrApiUrl: OCR_API_URL,
     groupsEnabled: ALLOW_GROUPS,
+    ownMessagesEnabled: PROCESS_OWN_MESSAGES,
   };
 }
 
@@ -332,6 +378,36 @@ function extensionForMimeType(mimetype) {
   if (mimetype.includes("png")) return "png";
   if (mimetype.includes("webp")) return "webp";
   return "jpg";
+}
+
+function recordMessage(message, source, status, extra = {}) {
+  state.messageStats.events += status === "received" ? 1 : 0;
+  state.lastMessage = {
+    at: new Date().toISOString(),
+    source,
+    status,
+    id: message.id?._serialized || null,
+    from: maskChatId(message.from),
+    to: maskChatId(message.to),
+    author: maskChatId(message.author),
+    fromMe: Boolean(message.fromMe),
+    type: message.type || null,
+    hasMedia: Boolean(message.hasMedia),
+    ...extra,
+  };
+}
+
+function ignoreMessage(message, source, reason) {
+  state.messageStats.ignored += 1;
+  recordMessage(message, source, "ignored", { reason });
+  console.log(
+    `Ignoring WhatsApp message ${message.id?._serialized || "unknown"} from ${maskChatId(message.from)}: ${reason}`,
+  );
+}
+
+function maskChatId(value) {
+  if (!value || typeof value !== "string") return null;
+  return value.replace(/\d{7,}/g, (digits) => `${digits.slice(0, 4)}...${digits.slice(-3)}`);
 }
 
 function resolveChromePath() {

@@ -146,6 +146,8 @@ Worker status:
 curl http://127.0.0.1:3001/whatsapp/status
 ```
 
+The status response includes `lastMessage` and `messageStats`. If an image is not processed, check `lastMessage.reason`. Common reasons are `group_messages_disabled` for group chats and `from_me_disabled` when testing by sending an image from the same WhatsApp account that is linked as the worker. Set `WHATSAPP_WEB_ALLOW_GROUPS=true` to process groups. For own-account media testing, set `WHATSAPP_WEB_PROCESS_OWN_MESSAGES=true`; own non-media messages are still ignored to avoid reply loops.
+
 Send a WhatsApp message directly:
 
 ```bash
