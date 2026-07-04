@@ -609,12 +609,12 @@ for line in existing.splitlines():
     if not stripped or stripped.startswith("#"):
         continue
     if not (
-        re.match(r"^ssl_(?:certificate|certificate_key|trusted_certificate)\s+", stripped)
-        or re.match(r"^ssl_dhparam\s+", stripped)
-        or re.match(r"^include\s+/etc/letsencrypt/", stripped)
+        re.match(r"^ssl_(?:certificate|certificate_key|trusted_certificate)\\s+", stripped)
+        or re.match(r"^ssl_dhparam\\s+", stripped)
+        or re.match(r"^include\\s+/etc/letsencrypt/", stripped)
     ):
         continue
-    normalized = re.sub(r"\s+", " ", stripped)
+    normalized = re.sub(r"\\s+", " ", stripped)
     if normalized not in seen:
         certbot_directives.append(stripped)
         seen.add(normalized)
@@ -628,7 +628,7 @@ if not any(line.startswith("ssl_certificate ") for line in certbot_directives) o
     print("Existing Nginx config mentions Certbot but does not contain both ssl_certificate and ssl_certificate_key; keeping HTTP config.")
     raise SystemExit(0)
 
-ssl_block = "\n".join(f"    {line}" for line in certbot_directives)
+ssl_block = "\\n".join(f"    {line}" for line in certbot_directives)
 proxy_common = """
     client_max_body_size 25m;
     proxy_read_timeout 300s;
