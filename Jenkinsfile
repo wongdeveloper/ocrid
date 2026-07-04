@@ -553,7 +553,7 @@ PY
                 scp "${ssh_opts[@]}" "$tmp_file" "$remote:$remote_tmp"
 
                 ssh "${ssh_opts[@]}" "$remote" \
-                  "SITE_AVAILABLE='$site_available' SITE_ENABLED='$site_enabled' REMOTE_TMP='$remote_tmp' /bin/bash -s" <<'EOF'
+                  "SITE_AVAILABLE='$site_available' SITE_ENABLED='$site_enabled' REMOTE_TMP='$remote_tmp' NGINX_SERVER_NAME='$NGINX_SERVER_NAME' WHATSAPP_UPSTREAM='$WHATSAPP_UPSTREAM' OCR_API_UPSTREAM='$OCR_API_UPSTREAM' /bin/bash -s" <<'EOF'
 set -euo pipefail
 
 sudo_run() {
@@ -585,6 +585,106 @@ SYSTEMCTL_BIN="$(command -v systemctl || true)"
 SERVICE_BIN="$(command -v service || true)"
 
 trap 'rm -f "$REMOTE_TMP"' EXIT
+
+python3 - "$REMOTE_TMP" "$SITE_AVAILABLE" "$NGINX_SERVER_NAME" "$WHATSAPP_UPSTREAM" "$OCR_API_UPSTREAM" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+config_path = Path(sys.argv[1])
+existing_path = Path(sys.argv[2])
+server_name = sys.argv[3]
+whatsapp_upstream = sys.argv[4]
+ocr_api_upstream = sys.argv[5]
+
+try:
+    existing = existing_path.read_text(errors="ignore")
+except FileNotFoundError:
+    existing = ""
+
+certbot_directives: list[str] = []
+seen: set[str] = set()
+for line in existing.splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if not (
+        re.match(r"^ssl_(?:certificate|certificate_key|trusted_certificate)\s+", stripped)
+        or re.match(r"^ssl_dhparam\s+", stripped)
+        or re.match(r"^include\s+/etc/letsencrypt/", stripped)
+    ):
+        continue
+    normalized = re.sub(r"\s+", " ", stripped)
+    if normalized not in seen:
+        certbot_directives.append(stripped)
+        seen.add(normalized)
+
+if not certbot_directives:
+    raise SystemExit(0)
+
+if not any(line.startswith("ssl_certificate ") for line in certbot_directives) or not any(
+    line.startswith("ssl_certificate_key ") for line in certbot_directives
+):
+    print("Existing Nginx config mentions Certbot but does not contain both ssl_certificate and ssl_certificate_key; keeping HTTP config.")
+    raise SystemExit(0)
+
+ssl_block = "\n".join(f"    {line}" for line in certbot_directives)
+proxy_common = """
+    client_max_body_size 25m;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    location /whatsapp/ {
+        proxy_pass __WHATSAPP_UPSTREAM__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass __OCR_API_UPSTREAM__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+""".replace("__WHATSAPP_UPSTREAM__", whatsapp_upstream).replace("__OCR_API_UPSTREAM__", ocr_api_upstream).rstrip()
+
+config_path.write_text(
+    f"""server {{
+    listen 80;
+    listen [::]:80;
+    server_name {server_name};
+
+    location /.well-known/acme-challenge/ {{
+        root /var/www/html;
+    }}
+
+    location / {{
+        return 301 https://$host$request_uri;
+    }}
+}}
+
+server {{
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {server_name};
+
+{ssl_block}
+
+{proxy_common}
+}}
+"""
+)
+print(f"Preserved Certbot SSL directives from {existing_path}.")
+PY
 
 sudo_run "$INSTALL_BIN" -d /etc/nginx/sites-available /etc/nginx/sites-enabled
 sudo_run "$INSTALL_BIN" -m 0644 "$REMOTE_TMP" "$SITE_AVAILABLE"
