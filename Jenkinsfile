@@ -252,6 +252,20 @@ require_cmd() {
 INSTALL_BIN="$(require_cmd install)"
 SYSTEMCTL_BIN="$(require_cmd systemctl)"
 
+if ! command -v tesseract >/dev/null 2>&1; then
+  APT_GET_BIN="$(require_cmd apt-get)"
+  echo "Installing Tesseract OCR on the target server."
+  sudo_run "$APT_GET_BIN" update
+  sudo_run "$APT_GET_BIN" install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-ind
+fi
+
+if ! command -v tesseract >/dev/null 2>&1; then
+  echo "Tesseract installation completed, but the tesseract executable is still not available in PATH."
+  exit 1
+fi
+
+tesseract --version | head -n 1
+
 cd "$APP_DIR"
 mkdir -p logs .runtime .wwebjs_auth .wwebjs_cache
 

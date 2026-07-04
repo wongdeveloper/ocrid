@@ -185,7 +185,7 @@ Target server requirements:
 
 - `rsync`, `python3`, `systemd`, and Nginx.
 - `curl` or `wget` if Node.js 18+ is not already installed on the target. The deployment bootstraps Node.js 20 under the app directory when needed.
-- Tesseract is optional when `OPENAI_API_KEY` is configured because AI vision can read images directly. Install `tesseract-ocr` and language data only if you want local OCR fallback or local-only mode.
+- `apt-get` on Ubuntu/Debian targets. The deployment installs `tesseract-ocr`, `tesseract-ocr-eng`, and `tesseract-ocr-ind` automatically when the `tesseract` executable is missing.
 - If the deploy user is not `root`, it must be able to run `sudo -n` for systemd and Nginx setup/reload without an interactive password.
 
 `DEV1` deploys to `/home/deploy/ocrid-dev` with services `ocrid-dev-api` and `ocrid-dev-whatsapp`. `main`/`master` deploys to `/home/deploy/ocrid` with services `ocrid-api` and `ocrid-whatsapp`.
@@ -193,7 +193,7 @@ Target server requirements:
 For a `deploy` user, configure passwordless sudo on each target server:
 
 ```bash
-echo 'deploy ALL=(root) NOPASSWD: /usr/bin/install, /usr/bin/ln, /usr/sbin/nginx, /bin/systemctl, /usr/bin/systemctl, /usr/sbin/service, /usr/bin/service' | sudo tee /etc/sudoers.d/ocrid-deploy
+echo 'deploy ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/install, /usr/bin/ln, /usr/sbin/nginx, /bin/systemctl, /usr/bin/systemctl, /usr/sbin/service, /usr/bin/service' | sudo tee /etc/sudoers.d/ocrid-deploy
 sudo chmod 0440 /etc/sudoers.d/ocrid-deploy
 sudo visudo -cf /etc/sudoers.d/ocrid-deploy
 ```
@@ -201,7 +201,7 @@ sudo visudo -cf /etc/sudoers.d/ocrid-deploy
 The pipeline resolves the exact command paths on the target server with `command -v`. If your server uses different paths, update `/etc/sudoers.d/ocrid-deploy` to match:
 
 ```bash
-command -v install ln nginx systemctl service
+command -v apt-get install ln nginx systemctl service
 ```
 
 If you prefer root SSH, set `DEV_DEPLOY_USER` and/or `PROD_DEPLOY_USER` to `root` in `Jenkinsfile` and store the matching root private key in the Jenkins SSH credential.
