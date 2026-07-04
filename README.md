@@ -148,6 +148,8 @@ curl http://127.0.0.1:3001/whatsapp/status
 
 The status response includes `lastMessage` and `messageStats`. If an image is not processed, check `lastMessage.reason`. Common reasons are `group_messages_disabled` for group chats and `from_me_disabled` when testing by sending an image from the same WhatsApp account that is linked as the worker. Set `WHATSAPP_WEB_ALLOW_GROUPS=true` to process groups. For own-account media testing, set `WHATSAPP_WEB_PROCESS_OWN_MESSAGES=true`; own non-media messages are still ignored to avoid reply loops.
 
+WhatsApp OCR requests wait up to 10 minutes by default. Override this with `WHATSAPP_OCR_TIMEOUT_MS` in the deployed `.env` file if large images need more time, for example `WHATSAPP_OCR_TIMEOUT_MS=900000`.
+
 Send a WhatsApp message directly:
 
 ```bash

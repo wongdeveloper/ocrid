@@ -503,8 +503,8 @@ server {
     server_name __NGINX_SERVER_NAME__;
 
     client_max_body_size 25m;
-    proxy_read_timeout 300s;
-    proxy_send_timeout 300s;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
 
     location /whatsapp/ {
         proxy_pass __WHATSAPP_UPSTREAM__;
@@ -631,8 +631,8 @@ if not any(line.startswith("ssl_certificate ") for line in certbot_directives) o
 ssl_block = "\\n".join(f"    {line}" for line in certbot_directives)
 proxy_common = """
     client_max_body_size 25m;
-    proxy_read_timeout 300s;
-    proxy_send_timeout 300s;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
 
     location /whatsapp/ {
         proxy_pass __WHATSAPP_UPSTREAM__;

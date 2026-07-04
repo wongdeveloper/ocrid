@@ -20,7 +20,7 @@ const API_KEY = process.env.WHATSAPP_BRIDGE_API_KEY || "";
 const ALLOW_GROUPS = process.env.WHATSAPP_WEB_ALLOW_GROUPS === "true";
 const PROCESS_OWN_MESSAGES = process.env.WHATSAPP_WEB_PROCESS_OWN_MESSAGES === "true";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const OCR_TIMEOUT_MS = 180_000;
+const OCR_TIMEOUT_MS = positiveIntegerEnv("WHATSAPP_OCR_TIMEOUT_MS", 600_000);
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
@@ -259,7 +259,11 @@ async function extractIdentityDocument(image, mimetype, originalFilename) {
   form.append("image", new Blob([image], { type: mimetype }), filename);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OCR_TIMEOUT_MS);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, OCR_TIMEOUT_MS);
   try {
     const response = await fetch(`${OCR_API_URL}/api/ocr?mode=auto`, {
       method: "POST",
@@ -275,6 +279,11 @@ async function extractIdentityDocument(image, mimetype, originalFilename) {
       throw new Error("OCR API returned no formatted text.");
     }
     return payload;
+  } catch (error) {
+    if (timedOut || error.name === "AbortError") {
+      throw new Error(`OCR API timed out after ${Math.round(OCR_TIMEOUT_MS / 1000)} seconds.`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -322,6 +331,7 @@ function statusPayload() {
     qrAvailable: Boolean(activeQr),
     qrUrl: activeQr ? `http://${HOST}:${PORT}/whatsapp/qr.svg` : null,
     ocrApiUrl: OCR_API_URL,
+    ocrTimeoutMs: OCR_TIMEOUT_MS,
     groupsEnabled: ALLOW_GROUPS,
     ownMessagesEnabled: PROCESS_OWN_MESSAGES,
   };
@@ -378,6 +388,11 @@ function extensionForMimeType(mimetype) {
   if (mimetype.includes("png")) return "png";
   if (mimetype.includes("webp")) return "webp";
   return "jpg";
+}
+
+function positiveIntegerEnv(name, defaultValue) {
+  const parsed = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 }
 
 function recordMessage(message, source, status, extra = {}) {
