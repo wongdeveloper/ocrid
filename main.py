@@ -42,7 +42,7 @@ async def health() -> dict:
         "aiConfigured": extractor.ai_configured,
         "aiModel": extractor.openai_model if extractor.ai_configured else None,
         "aiOcrModel": extractor.openai_ocr_model if extractor.ai_configured else None,
-        "localOcr": True,
+        "localOcr": extractor.local_ocr_available,
         "supportedDocuments": ["KTP", "SIM"],
         "whatsappConfigured": bool(ACCESS_TOKEN and PHONE_NUMBER_ID and VERIFY_TOKEN),
         "webhookPath": WEBHOOK_PATH,

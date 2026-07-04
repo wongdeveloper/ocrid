@@ -159,28 +159,61 @@ class KtpExtractor:
     def ai_configured(self) -> bool:
         return bool(self.openai_api_key)
 
+    @property
+    def local_ocr_available(self) -> bool:
+        return bool(self.tesseract_cmd)
+
     def extract(self, image_bytes: bytes, mode: Literal["auto", "ai", "local"] = "auto") -> KtpResult:
         if not image_bytes:
             raise ValueError("Image is empty")
 
-        local_text = self.local_ocr(image_bytes)
-        local_fields = normalize_fields(parse_local_ocr(local_text))
-
         should_use_ai = mode == "ai" or (mode == "auto" and self.ai_configured)
+        local_text = ""
+        local_fields = KtpFields()
+        local_warnings: list[str] = []
+
+        if self.local_ocr_available:
+            try:
+                local_text = self.local_ocr(image_bytes)
+                local_fields = normalize_fields(parse_local_ocr(local_text))
+            except pytesseract.TesseractNotFoundError as exc:
+                self.tesseract_cmd = ""
+                local_warnings.append("Local Tesseract OCR is unavailable; AI vision used without OCR candidates.")
+                if not should_use_ai:
+                    raise RuntimeError("Local OCR requires the tesseract executable to be installed on the server.") from exc
+            except Exception as exc:
+                if not should_use_ai:
+                    raise
+                local_warnings.append(f"Local OCR failed; AI vision used without OCR candidates: {type(exc).__name__}")
+        elif not should_use_ai:
+            raise RuntimeError("Local OCR requires the tesseract executable to be installed on the server.")
+        elif self.ai_configured:
+            local_warnings.append("Local Tesseract OCR is unavailable; AI vision used without OCR candidates.")
+
         if should_use_ai and not self.ai_configured:
-            warnings = ["AI mode requested, but OPENAI_API_KEY is not configured. Used local OCR."]
+            if not local_text:
+                raise RuntimeError("AI mode requested, but OPENAI_API_KEY is not configured and local OCR is unavailable.")
+            warnings = [*local_warnings, "AI mode requested, but OPENAI_API_KEY is not configured. Used local OCR."]
             return build_result(local_fields, local_text, "local-tesseract", warnings)
 
         if should_use_ai:
             try:
                 ai_fields, confidence, warnings = self.ai_extract(image_bytes, local_text)
                 merged = merge_fields(normalize_fields(ai_fields), local_fields)
-                return build_result(merged, local_text, f"openai-vision:{self.openai_ocr_model}", warnings, confidence)
+                return build_result(
+                    merged,
+                    local_text,
+                    f"openai-vision:{self.openai_ocr_model}",
+                    [*local_warnings, *warnings],
+                    confidence,
+                )
             except Exception as exc:
+                if not local_text:
+                    raise RuntimeError(f"AI extraction failed and local OCR is unavailable: {type(exc).__name__}") from exc
                 warnings = [f"AI extraction failed; local OCR was used: {type(exc).__name__}"]
                 return build_result(local_fields, local_text, "local-tesseract-fallback", warnings)
 
-        return build_result(local_fields, local_text, "local-tesseract")
+        return build_result(local_fields, local_text, "local-tesseract", local_warnings)
 
     def local_ocr(self, image_bytes: bytes) -> str:
         images = make_ocr_images(image_bytes)

@@ -2,6 +2,7 @@ import unittest
 
 from ktp_ai import (
     KtpFields,
+    KtpExtractor,
     compact_ocr_context,
     detect_document_type,
     format_fields,
@@ -13,6 +14,45 @@ from ktp_ai import (
 
 
 class KtpAiTests(unittest.TestCase):
+    def test_ai_mode_does_not_require_local_tesseract(self):
+        extractor = KtpExtractor()
+        extractor.openai_api_key = "test-key"
+        extractor.tesseract_cmd = ""
+
+        def fake_ai_extract(image_bytes: bytes, local_text: str):
+            self.assertEqual(image_bytes, b"image-bytes")
+            self.assertEqual(local_text, "")
+            return (
+                KtpFields(
+                    documentType="KTP",
+                    name="BUDI SANTOSO",
+                    nik="3578100101900001",
+                    birth="SURABAYA, 01-01-1990",
+                    religion="ISLAM",
+                    address="JL MERDEKA NO 1",
+                    city="KOTA SURABAYA",
+                ),
+                0.94,
+                [],
+            )
+
+        extractor.ai_extract = fake_ai_extract
+
+        result = extractor.extract(b"image-bytes", "auto")
+
+        self.assertEqual(result.engine, f"openai-vision:{extractor.openai_ocr_model}")
+        self.assertEqual(result.rawText, "")
+        self.assertEqual(result.fields.name, "BUDI SANTOSO")
+        self.assertIn("Local Tesseract OCR is unavailable", " ".join(result.warnings))
+
+    def test_local_mode_requires_tesseract(self):
+        extractor = KtpExtractor()
+        extractor.openai_api_key = ""
+        extractor.tesseract_cmd = ""
+
+        with self.assertRaisesRegex(RuntimeError, "tesseract executable"):
+            extractor.extract(b"image-bytes", "local")
+
     def test_parse_labeled_ktp_text(self):
         fields = parse_local_ocr(
             """

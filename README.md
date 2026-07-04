@@ -185,6 +185,7 @@ Target server requirements:
 
 - `rsync`, `python3`, `systemd`, and Nginx.
 - `curl` or `wget` if Node.js 18+ is not already installed on the target. The deployment bootstraps Node.js 20 under the app directory when needed.
+- Tesseract is optional when `OPENAI_API_KEY` is configured because AI vision can read images directly. Install `tesseract-ocr` and language data only if you want local OCR fallback or local-only mode.
 - If the deploy user is not `root`, it must be able to run `sudo -n` for systemd and Nginx setup/reload without an interactive password.
 
 `DEV1` deploys to `/home/deploy/ocrid-dev` with services `ocrid-dev-api` and `ocrid-dev-whatsapp`. `main`/`master` deploys to `/home/deploy/ocrid` with services `ocrid-api` and `ocrid-whatsapp`.
