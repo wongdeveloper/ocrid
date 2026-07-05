@@ -53,6 +53,73 @@ class KtpAiTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "tesseract executable"):
             extractor.extract(b"image-bytes", "local")
 
+    def test_ai_mode_uses_fast_local_ocr_context(self):
+        extractor = KtpExtractor()
+        extractor.openai_api_key = "test-key"
+        extractor.tesseract_cmd = "tesseract"
+        extractor.openai_ocr_local_context_images = 3
+        extractor.openai_ocr_local_context_timeout = 8
+        calls = []
+
+        def fake_local_ocr(image_bytes: bytes, max_images=None, psms=(6, 11), timeout_seconds=None):
+            calls.append((image_bytes, max_images, psms, timeout_seconds))
+            return "NIK: 3578100101900001\nNama: BUDI SANTOSO"
+
+        def fake_ai_extract(_image_bytes: bytes, local_text: str):
+            self.assertIn("BUDI SANTOSO", local_text)
+            return (
+                KtpFields(
+                    documentType="KTP",
+                    name="BUDI SANTOSO",
+                    nik="3578100101900001",
+                    birth="SURABAYA, 01-01-1990",
+                    religion="ISLAM",
+                    address="JL MERDEKA NO 1",
+                    city="KOTA SURABAYA",
+                ),
+                0.94,
+                [],
+            )
+
+        extractor.local_ocr = fake_local_ocr
+        extractor.ai_extract = fake_ai_extract
+
+        result = extractor.extract(b"image-bytes", "auto")
+
+        self.assertEqual(result.fields.name, "BUDI SANTOSO")
+        self.assertEqual(calls, [(b"image-bytes", 3, (6,), 8)])
+
+    def test_ai_failure_falls_back_to_full_local_ocr(self):
+        extractor = KtpExtractor()
+        extractor.openai_api_key = "test-key"
+        extractor.tesseract_cmd = "tesseract"
+        extractor.openai_ocr_local_context_images = 3
+        extractor.openai_ocr_local_context_timeout = 8
+        calls = []
+
+        def fake_local_ocr(_image_bytes: bytes, max_images=None, psms=(6, 11), timeout_seconds=None):
+            calls.append((max_images, psms, timeout_seconds))
+            if max_images:
+                return "NOISY FAST OCR"
+            return """
+            NIK: 3578100101900001
+            Nama: BUDI SANTOSO
+            Tempat/Tgl Lahir: SURABAYA, 01-01-1990
+            Alamat: JL MERDEKA NO 1
+            """
+
+        def fake_ai_extract(_image_bytes: bytes, _local_text: str):
+            raise RuntimeError("AI unavailable")
+
+        extractor.local_ocr = fake_local_ocr
+        extractor.ai_extract = fake_ai_extract
+
+        result = extractor.extract(b"image-bytes", "auto")
+
+        self.assertEqual(result.engine, "local-tesseract-fallback")
+        self.assertEqual(result.fields.name, "BUDI SANTOSO")
+        self.assertEqual(calls, [(3, (6,), 8), (None, (6, 11), None)])
+
     def test_parse_labeled_ktp_text(self):
         fields = parse_local_ocr(
             """
@@ -151,6 +218,32 @@ class KtpAiTests(unittest.TestCase):
         fields = KtpFields(documentType="KTP", name="BUDI SANTOSO", nik="3578100101900001")
 
         self.assertTrue(needs_accurate_ai_retry(fields, 0.9, []))
+
+    def test_retry_gate_ignores_optional_blood_type_warning(self):
+        fields = KtpFields(
+            documentType="KTP",
+            name="BUDI SANTOSO",
+            nik="3578100101900001",
+            birth="SURABAYA, 01-01-1990",
+            religion="ISLAM",
+            address="JL MERDEKA NO 1",
+            city="KOTA SURABAYA",
+        )
+
+        self.assertFalse(needs_accurate_ai_retry(fields, 0.9, ["Blood type value is not visible."]))
+
+    def test_retry_gate_retries_required_address_warning(self):
+        fields = KtpFields(
+            documentType="KTP",
+            name="BUDI SANTOSO",
+            nik="3578100101900001",
+            birth="SURABAYA, 01-01-1990",
+            religion="ISLAM",
+            address="JL MERDEKA NO 1",
+            city="KOTA SURABAYA",
+        )
+
+        self.assertTrue(needs_accurate_ai_retry(fields, 0.9, ["Address is unclear."]))
 
     def test_parser_accepts_valid_nik_from_unlisted_region(self):
         fields = parse_local_ocr("NIK: 3305120310920002")

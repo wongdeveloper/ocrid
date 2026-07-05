@@ -47,11 +47,16 @@ OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-5.5
 OPENAI_OCR_MODEL=gpt-4.1
 OPENAI_OCR_ADAPTIVE=true
+OPENAI_OCR_LOCAL_CONTEXT=true
+OPENAI_OCR_LOCAL_CONTEXT_IMAGES=3
+OPENAI_OCR_LOCAL_CONTEXT_TIMEOUT_SECONDS=8
 ```
 
 Restart `npm run start` after changing `.env`. `OPENAI_OCR_MODEL` is optional; when present, the OCR pipeline uses it for image extraction while `OPENAI_MODEL` can remain your general default. AI mode sends the KTP or SIM image to the configured OpenAI API account. Leave `OPENAI_API_KEY` empty to keep processing local.
 
 `OPENAI_OCR_ADAPTIVE=true` reduces average token usage by sending broad KTP context images at low detail, keeping the focused NIK/name/address/RT-RW crops at high detail, and retrying with the full accurate payload only when validation detects an incomplete or risky extraction. Set `OPENAI_OCR_ADAPTIVE=false` to force the previous full-detail single-pass behavior.
+
+When AI mode is enabled and Tesseract is installed, the app now uses a bounded local OCR pass only as extra context before calling OpenAI. The defaults run at most `OPENAI_OCR_LOCAL_CONTEXT_IMAGES=3` image variants with `OPENAI_OCR_LOCAL_CONTEXT_TIMEOUT_SECONDS=8` per Tesseract pass, then keep the full Tesseract sweep for local mode or AI fallback. Set `OPENAI_OCR_LOCAL_CONTEXT=false` for the fastest AI-only first pass.
 
 ## Batch testing
 

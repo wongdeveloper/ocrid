@@ -149,6 +149,9 @@ class KtpExtractor:
         self.openai_ocr_adaptive = env_flag("OPENAI_OCR_ADAPTIVE", True)
         self.openai_ocr_context_chars = env_int("OPENAI_OCR_CONTEXT_CHARS", 5000)
         self.openai_ocr_fallback_context_chars = env_int("OPENAI_OCR_FALLBACK_CONTEXT_CHARS", 12000)
+        self.openai_ocr_local_context = env_flag("OPENAI_OCR_LOCAL_CONTEXT", True)
+        self.openai_ocr_local_context_images = max(1, env_int("OPENAI_OCR_LOCAL_CONTEXT_IMAGES", 3))
+        self.openai_ocr_local_context_timeout = max(1, env_int("OPENAI_OCR_LOCAL_CONTEXT_TIMEOUT_SECONDS", 8))
         self.tessdata_dir = ensure_tesseract_data()
         self.tesseract_language = os.getenv("TESSERACT_LANGUAGE", "ind+eng")
         self.tesseract_cmd = resolve_tesseract_cmd()
@@ -171,10 +174,16 @@ class KtpExtractor:
         local_text = ""
         local_fields = KtpFields()
         local_warnings: list[str] = []
+        local_profile = "fast" if should_use_ai else "full"
 
-        if self.local_ocr_available:
+        if self.local_ocr_available and (not should_use_ai or self.openai_ocr_local_context):
             try:
-                local_text = self.local_ocr(image_bytes)
+                local_text = self.local_ocr(
+                    image_bytes,
+                    max_images=self.openai_ocr_local_context_images if should_use_ai else None,
+                    psms=(6,) if should_use_ai else (6, 11),
+                    timeout_seconds=self.openai_ocr_local_context_timeout if should_use_ai else None,
+                )
                 local_fields = normalize_fields(parse_local_ocr(local_text))
             except pytesseract.TesseractNotFoundError as exc:
                 self.tesseract_cmd = ""
@@ -208,6 +217,12 @@ class KtpExtractor:
                     confidence,
                 )
             except Exception as exc:
+                if local_profile == "fast" and self.local_ocr_available:
+                    try:
+                        local_text = self.local_ocr(image_bytes)
+                        local_fields = normalize_fields(parse_local_ocr(local_text))
+                    except Exception:
+                        pass
                 if not local_text:
                     raise RuntimeError(f"AI extraction failed and local OCR is unavailable: {type(exc).__name__}") from exc
                 warnings = [f"AI extraction failed; local OCR was used: {type(exc).__name__}"]
@@ -215,20 +230,36 @@ class KtpExtractor:
 
         return build_result(local_fields, local_text, "local-tesseract", local_warnings)
 
-    def local_ocr(self, image_bytes: bytes) -> str:
+    def local_ocr(
+        self,
+        image_bytes: bytes,
+        max_images: int | None = None,
+        psms: tuple[int, ...] = (6, 11),
+        timeout_seconds: int | None = None,
+    ) -> str:
         images = make_ocr_images(image_bytes)
+        if max_images:
+            images = images[:max_images]
         outputs: list[str] = []
 
         for index, image in enumerate(images):
-            for psm in (6, 11):
-                text = pytesseract.image_to_string(
-                    image,
-                    lang=self.tesseract_language,
-                    config=(
-                        f'--tessdata-dir "{self.tessdata_dir}" --oem 3 --psm {psm} '
-                        "-c preserve_interword_spaces=1"
-                    ),
-                )
+            for psm in psms:
+                kwargs = {"timeout": timeout_seconds} if timeout_seconds else {}
+                try:
+                    text = pytesseract.image_to_string(
+                        image,
+                        lang=self.tesseract_language,
+                        config=(
+                            f'--tessdata-dir "{self.tessdata_dir}" --oem 3 --psm {psm} '
+                            "-c preserve_interword_spaces=1"
+                        ),
+                        **kwargs,
+                    )
+                except RuntimeError as exc:
+                    if not timeout_seconds:
+                        raise
+                    outputs.append(f"PASS {index + 1} PSM {psm}\nTESSERACT_TIMEOUT_OR_ERROR: {exc}")
+                    continue
                 outputs.append(f"PASS {index + 1} PSM {psm}\n{text.strip()}")
 
         return normalize_text("\n".join(outputs))
@@ -1236,11 +1267,47 @@ def needs_accurate_ai_retry(fields: KtpFields, confidence: float, warnings: list
         return True
     if validation_warnings:
         return True
-    serious_ai_warning = any(
-        re.search(r"\b(?:not detected|not visible|unclear|unreadable|failed|cannot|could not)\b", warning, re.I)
+    return any(
+        is_retryable_ai_warning(warning, normalized.documentType)
         for warning in warnings
     )
-    return serious_ai_warning
+
+
+def is_retryable_ai_warning(warning: str, document_type: str) -> bool:
+    if not re.search(r"\b(?:not detected|not visible|unclear|unreadable|failed|cannot|could not)\b", warning, re.I):
+        return False
+
+    upper = normalize_search(warning)
+    if document_type == "SIM":
+        required_terms = (
+            "SIM",
+            "LICENSE",
+            "CLASS",
+            "NAME",
+            "NAMA",
+            "BIRTH",
+            "LAHIR",
+            "ADDRESS",
+            "ALAMAT",
+            "EXPIRY",
+            "VALID",
+        )
+    else:
+        required_terms = (
+            "NIK",
+            "NAME",
+            "NAMA",
+            "BIRTH",
+            "LAHIR",
+            "RELIGION",
+            "AGAMA",
+            "ADDRESS",
+            "ALAMAT",
+            "CITY",
+            "KOTA",
+            "KABUPATEN",
+        )
+    return any(term in upper for term in required_terms)
 
 
 def compact_ocr_context(local_text: str, max_chars: int = 5000) -> str:
