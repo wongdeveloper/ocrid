@@ -176,13 +176,12 @@ client.initialize().catch((error) => {
 });
 
 async function handleIncomingMessage(message, source = "message") {
-  const messageId = message.id?._serialized;
-  recordMessage(message, source, "received");
+  const messageId = messageIdentityKey(message);
+  recordMessage(message, source, "received", {
+    id: messageId,
+    idSource: messageIdentitySource(message),
+  });
 
-  if (!messageId) {
-    ignoreMessage(message, source, "missing_message_id");
-    return;
-  }
   if (message.from === "status@broadcast") {
     ignoreMessage(message, source, "status_broadcast");
     return;
@@ -244,7 +243,7 @@ async function handleIncomingMessage(message, source = "message") {
     state.lastError = error.message;
     state.messageStats.ocrFailed += 1;
     recordMessage(message, source, "failed", { error: error.message });
-    console.error(`Failed to process WhatsApp message ${messageId}:`, error);
+    console.error(`Failed to process WhatsApp message ${messageId || "unknown"}:`, error);
     await safeReply(
       message,
       "Maaf, foto KTP/SIM belum berhasil diproses. Pastikan layanan OCR aktif lalu kirim ulang foto yang terang, dekat, dan tidak blur.",
@@ -372,11 +371,21 @@ function requireApiKey(request, response, next) {
 
 async function safeReply(message, text) {
   for (let start = 0; start < text.length; start += 3900) {
-    await message.reply(text.slice(start, start + 3900));
+    const chunk = text.slice(start, start + 3900);
+    try {
+      await message.reply(chunk);
+    } catch (error) {
+      const chatId = message.from || message.to;
+      if (!chatId) {
+        throw error;
+      }
+      await client.sendMessage(chatId, chunk);
+    }
   }
 }
 
 function rememberMessage(messageId) {
+  if (!messageId) return;
   processedMessages.add(messageId);
   if (processedMessages.size > 5000) {
     const oldest = processedMessages.values().next().value;
@@ -401,7 +410,8 @@ function recordMessage(message, source, status, extra = {}) {
     at: new Date().toISOString(),
     source,
     status,
-    id: message.id?._serialized || null,
+    id: messageIdentityKey(message),
+    idSource: messageIdentitySource(message),
     from: maskChatId(message.from),
     to: maskChatId(message.to),
     author: maskChatId(message.author),
@@ -416,8 +426,74 @@ function ignoreMessage(message, source, reason) {
   state.messageStats.ignored += 1;
   recordMessage(message, source, "ignored", { reason });
   console.log(
-    `Ignoring WhatsApp message ${message.id?._serialized || "unknown"} from ${maskChatId(message.from)}: ${reason}`,
+    `Ignoring WhatsApp message ${messageIdentityKey(message) || "unknown"} from ${maskChatId(message.from)}: ${reason}`,
   );
+}
+
+function messageIdentityKey(message) {
+  const explicitId = explicitMessageId(message);
+  if (explicitId) {
+    return `id:${explicitId}`;
+  }
+
+  const fallbackParts = [
+    message.from || "",
+    message.to || "",
+    message.author || "",
+    message.timestamp || message._data?.t || "",
+    message.type || message._data?.type || "",
+    message.hasMedia ? "media" : "text",
+    mediaIdentity(message),
+    textIdentity(message),
+  ].filter(Boolean);
+
+  if (fallbackParts.length === 0) {
+    return null;
+  }
+  return `fallback:${hashText(fallbackParts.join("|"))}`;
+}
+
+function messageIdentitySource(message) {
+  if (explicitMessageId(message)) return "message_id";
+  if (mediaIdentity(message)) return "media_fingerprint";
+  if (textIdentity(message)) return "text_fingerprint";
+  return "message_metadata";
+}
+
+function explicitMessageId(message) {
+  const candidates = [
+    message.id?._serialized,
+    message.id?.id,
+    message._data?.id?._serialized,
+    message._data?.id?.id,
+    message._data?.quotedStanzaID,
+    message._data?.stanzaId,
+  ];
+  return candidates.find((candidate) => typeof candidate === "string" && candidate.trim()) || "";
+}
+
+function mediaIdentity(message) {
+  const data = message._data || {};
+  const candidates = [
+    data.mediaKey,
+    data.filehash,
+    data.encFilehash,
+    data.directPath,
+    data.clientUrl,
+    data.deprecatedMms3Url,
+    data.mimetype,
+    data.size ? String(data.size) : "",
+  ];
+  return candidates.filter((candidate) => typeof candidate === "string" && candidate.trim()).join("|");
+}
+
+function textIdentity(message) {
+  const text = message.body || message.caption || message._data?.body || message._data?.caption || "";
+  return text ? hashText(String(text).slice(0, 1000)) : "";
+}
+
+function hashText(value) {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
 function maskChatId(value) {
