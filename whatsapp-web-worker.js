@@ -21,6 +21,7 @@ const ALLOW_GROUPS = process.env.WHATSAPP_WEB_ALLOW_GROUPS === "true";
 const PROCESS_OWN_MESSAGES = process.env.WHATSAPP_WEB_PROCESS_OWN_MESSAGES === "true";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const OCR_TIMEOUT_MS = positiveIntegerEnv("WHATSAPP_OCR_TIMEOUT_MS", 600_000);
+const MISSING_ID_MEDIA_DELAY_MS = positiveIntegerEnv("WHATSAPP_MISSING_ID_MEDIA_DELAY_MS", 1200);
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
@@ -33,6 +34,8 @@ const state = {
   lastQrAt: null,
   lastError: null,
   lastMessage: null,
+  lastInboundMessage: null,
+  lastFailure: null,
   messageStats: {
     events: 0,
     ignored: 0,
@@ -43,6 +46,7 @@ const state = {
 };
 
 const processedMessages = new Set();
+const activeMessages = new Set();
 let activeQr = null;
 const chromePath = resolveChromePath();
 
@@ -176,7 +180,9 @@ client.initialize().catch((error) => {
 });
 
 async function handleIncomingMessage(message, source = "message") {
-  const messageId = messageIdentityKey(message);
+  const explicitId = explicitMessageId(message);
+  let messageKeys = messageIdentityKeys(message);
+  let messageId = messageKeys[0] || null;
   recordMessage(message, source, "received", {
     id: messageId,
     idSource: messageIdentitySource(message),
@@ -186,7 +192,7 @@ async function handleIncomingMessage(message, source = "message") {
     ignoreMessage(message, source, "status_broadcast");
     return;
   }
-  if (processedMessages.has(messageId)) {
+  if (hasRememberedMessage(messageKeys)) {
     state.messageStats.ignored += 1;
     console.log(`Ignoring WhatsApp message ${messageId} from ${maskChatId(message.from)}: duplicate_event`);
     return;
@@ -197,7 +203,6 @@ async function handleIncomingMessage(message, source = "message") {
     console.log(`Ignoring WhatsApp message ${messageId} from ${maskChatId(message.from)}: ${reason}`);
     return;
   }
-  rememberMessage(messageId);
 
   if (!ALLOW_GROUPS && String(message.from || "").endsWith("@g.us")) {
     ignoreMessage(message, source, "group_messages_disabled");
@@ -210,9 +215,36 @@ async function handleIncomingMessage(message, source = "message") {
     return;
   }
 
+  if (!explicitId && MISSING_ID_MEDIA_DELAY_MS > 0) {
+    recordMessage(message, source, "waiting_for_message_id", {
+      waitMs: MISSING_ID_MEDIA_DELAY_MS,
+      id: messageId,
+      idSource: messageIdentitySource(message),
+    });
+    await delay(MISSING_ID_MEDIA_DELAY_MS);
+    const resolvedMessage = await findRecentMediaMessageWithId(message);
+    if (resolvedMessage) {
+      message = resolvedMessage;
+      recordMessage(message, source, "resolved_message_id", {
+        id: messageIdentityKey(message),
+        idSource: messageIdentitySource(message),
+      });
+    }
+    messageKeys = messageIdentityKeys(message);
+    messageId = messageKeys[0] || messageId;
+    if (hasRememberedMessage(messageKeys)) {
+      state.messageStats.ignored += 1;
+      console.log(`Ignoring WhatsApp message ${messageId || "unknown"} from ${maskChatId(message.from)}: duplicate_event`);
+      return;
+    }
+  }
+
+  markActiveMessage(messageKeys);
+  let stage = "downloading_media";
   try {
     recordMessage(message, source, "downloading_media");
     const media = await message.downloadMedia();
+    stage = "validating_media";
     if (!media?.data || !media.mimetype?.startsWith("image/")) {
       ignoreMessage(message, source, `unsupported_media:${media?.mimetype || "unknown"}`);
       await safeReply(message, "File tersebut bukan gambar. Kirim foto KTP atau SIM dalam format gambar.");
@@ -226,13 +258,16 @@ async function handleIncomingMessage(message, source = "message") {
       return;
     }
 
+    stage = "calling_ocr_api";
     recordMessage(message, source, "processing_ocr", { mimetype: media.mimetype, imageBytes: image.length });
     const result = await extractIdentityDocument(image, media.mimetype, media.filename);
     let reply = result.formattedText;
     if (Array.isArray(result.warnings) && result.warnings.length > 0) {
       reply += `\n\nPerlu diperiksa:\n- ${result.warnings.join("\n- ")}`;
     }
+    stage = "replying";
     await safeReply(message, reply);
+    markProcessedMessage(messageKeys);
     state.messageStats.processed += 1;
     state.messageStats.ocrSucceeded += 1;
     recordMessage(message, source, "processed", {
@@ -240,14 +275,26 @@ async function handleIncomingMessage(message, source = "message") {
       engine: result.engine || null,
     });
   } catch (error) {
-    state.lastError = error.message;
+    const details = recordFailure(message, source, stage, error);
     state.messageStats.ocrFailed += 1;
-    recordMessage(message, source, "failed", { error: error.message });
-    console.error(`Failed to process WhatsApp message ${messageId || "unknown"}:`, error);
-    await safeReply(
-      message,
-      "Maaf, foto KTP/SIM belum berhasil diproses. Pastikan layanan OCR aktif lalu kirim ulang foto yang terang, dekat, dan tidak blur.",
-    );
+    recordMessage(message, source, "failed", { stage, error: details.message, errorName: details.name });
+    console.error(`Failed to process WhatsApp message ${messageId || "unknown"} at ${stage}:`, error);
+    try {
+      await safeReply(
+        message,
+        "Maaf, foto KTP/SIM belum berhasil diproses. Pastikan layanan OCR aktif lalu kirim ulang foto yang terang, dekat, dan tidak blur.",
+      );
+    } catch (replyError) {
+      state.lastReplyError = {
+        at: new Date().toISOString(),
+        id: messageId,
+        ...errorDetails(replyError),
+      };
+      console.error(`Failed to send OCR failure reply for ${messageId || "unknown"}:`, replyError);
+    }
+    state.lastError = details.message;
+  } finally {
+    unmarkActiveMessage(messageKeys);
   }
 }
 
@@ -333,6 +380,7 @@ function statusPayload() {
     ocrTimeoutMs: OCR_TIMEOUT_MS,
     groupsEnabled: ALLOW_GROUPS,
     ownMessagesEnabled: PROCESS_OWN_MESSAGES,
+    missingIdMediaDelayMs: MISSING_ID_MEDIA_DELAY_MS,
   };
 }
 
@@ -393,6 +441,28 @@ function rememberMessage(messageId) {
   }
 }
 
+function hasRememberedMessage(messageKeys) {
+  return messageKeys.some((messageKey) => processedMessages.has(messageKey) || activeMessages.has(messageKey));
+}
+
+function markActiveMessage(messageKeys) {
+  for (const messageKey of messageKeys) {
+    activeMessages.add(messageKey);
+  }
+}
+
+function unmarkActiveMessage(messageKeys) {
+  for (const messageKey of messageKeys) {
+    activeMessages.delete(messageKey);
+  }
+}
+
+function markProcessedMessage(messageKeys) {
+  for (const messageKey of messageKeys) {
+    rememberMessage(messageKey);
+  }
+}
+
 function extensionForMimeType(mimetype) {
   if (mimetype.includes("png")) return "png";
   if (mimetype.includes("webp")) return "webp";
@@ -406,7 +476,7 @@ function positiveIntegerEnv(name, defaultValue) {
 
 function recordMessage(message, source, status, extra = {}) {
   state.messageStats.events += status === "received" ? 1 : 0;
-  state.lastMessage = {
+  const payload = {
     at: new Date().toISOString(),
     source,
     status,
@@ -420,6 +490,10 @@ function recordMessage(message, source, status, extra = {}) {
     hasMedia: Boolean(message.hasMedia),
     ...extra,
   };
+  state.lastMessage = payload;
+  if (!message.fromMe) {
+    state.lastInboundMessage = payload;
+  }
 }
 
 function ignoreMessage(message, source, reason) {
@@ -431,9 +505,19 @@ function ignoreMessage(message, source, reason) {
 }
 
 function messageIdentityKey(message) {
+  return messageIdentityKeys(message)[0] || null;
+}
+
+function messageIdentityKeys(message) {
+  const keys = [];
   const explicitId = explicitMessageId(message);
   if (explicitId) {
-    return `id:${explicitId}`;
+    keys.push(`id:${explicitId}`);
+  }
+
+  const mediaFingerprint = mediaIdentity(message);
+  if (mediaFingerprint) {
+    keys.push(`media:${hashText(mediaFingerprint)}`);
   }
 
   const fallbackParts = [
@@ -443,14 +527,15 @@ function messageIdentityKey(message) {
     message.timestamp || message._data?.t || "",
     message.type || message._data?.type || "",
     message.hasMedia ? "media" : "text",
-    mediaIdentity(message),
+    mediaFingerprint,
     textIdentity(message),
   ].filter(Boolean);
 
-  if (fallbackParts.length === 0) {
-    return null;
+  if (fallbackParts.length > 0) {
+    keys.push(`fallback:${hashText(fallbackParts.join("|"))}`);
   }
-  return `fallback:${hashText(fallbackParts.join("|"))}`;
+
+  return [...new Set(keys)];
 }
 
 function messageIdentitySource(message) {
@@ -458,6 +543,68 @@ function messageIdentitySource(message) {
   if (mediaIdentity(message)) return "media_fingerprint";
   if (textIdentity(message)) return "text_fingerprint";
   return "message_metadata";
+}
+
+function recordFailure(message, source, stage, error) {
+  const details = errorDetails(error);
+  state.lastError = details.message;
+  state.lastFailure = {
+    at: new Date().toISOString(),
+    source,
+    stage,
+    id: messageIdentityKey(message),
+    idSource: messageIdentitySource(message),
+    from: maskChatId(message.from),
+    to: maskChatId(message.to),
+    author: maskChatId(message.author),
+    fromMe: Boolean(message.fromMe),
+    type: message.type || null,
+    hasMedia: Boolean(message.hasMedia),
+    ...details,
+  };
+  return details;
+}
+
+function errorDetails(error) {
+  const message = error?.message ? String(error.message) : String(error || "Unknown error");
+  const stack = error?.stack ? String(error.stack).split("\n").slice(0, 6).join("\n") : null;
+  return {
+    name: error?.name || error?.constructor?.name || "Error",
+    message,
+    stack,
+  };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function findRecentMediaMessageWithId(message) {
+  if (explicitMessageId(message) || !message.hasMedia) {
+    return null;
+  }
+
+  try {
+    const chat = await message.getChat();
+    const messages = await chat.fetchMessages({ limit: 15 });
+    const originalTimestamp = Number(message.timestamp || message._data?.t || 0);
+    const originalType = message.type || message._data?.type || "";
+
+    return [...messages].reverse().find((candidate) => {
+      if (!candidate?.hasMedia || candidate.fromMe !== message.fromMe || !explicitMessageId(candidate)) {
+        return false;
+      }
+      const candidateTimestamp = Number(candidate.timestamp || candidate._data?.t || 0);
+      if (originalTimestamp && candidateTimestamp && Math.abs(candidateTimestamp - originalTimestamp) > 30) {
+        return false;
+      }
+      const candidateType = candidate.type || candidate._data?.type || "";
+      return !originalType || !candidateType || originalType === candidateType;
+    }) || null;
+  } catch (error) {
+    console.warn(`Could not resolve media message id for ${messageIdentityKey(message) || "unknown"}:`, error);
+    return null;
+  }
 }
 
 function explicitMessageId(message) {
