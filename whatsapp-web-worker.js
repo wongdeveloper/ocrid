@@ -22,6 +22,8 @@ const PROCESS_OWN_MESSAGES = process.env.WHATSAPP_WEB_PROCESS_OWN_MESSAGES === "
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const OCR_TIMEOUT_MS = positiveIntegerEnv("WHATSAPP_OCR_TIMEOUT_MS", 600_000);
 const MISSING_ID_MEDIA_DELAY_MS = positiveIntegerEnv("WHATSAPP_MISSING_ID_MEDIA_DELAY_MS", 1200);
+const MEDIA_DOWNLOAD_RETRIES = positiveIntegerEnv("WHATSAPP_MEDIA_DOWNLOAD_RETRIES", 2);
+const MEDIA_DOWNLOAD_RETRY_DELAY_MS = positiveIntegerEnv("WHATSAPP_MEDIA_DOWNLOAD_RETRY_DELAY_MS", 900);
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
@@ -243,7 +245,7 @@ async function handleIncomingMessage(message, source = "message") {
   let stage = "downloading_media";
   try {
     recordMessage(message, source, "downloading_media");
-    const media = await message.downloadMedia();
+    const media = await downloadMessageMedia(message);
     stage = "validating_media";
     if (!media?.data || !media.mimetype?.startsWith("image/")) {
       ignoreMessage(message, source, `unsupported_media:${media?.mimetype || "unknown"}`);
@@ -259,7 +261,12 @@ async function handleIncomingMessage(message, source = "message") {
     }
 
     stage = "calling_ocr_api";
-    recordMessage(message, source, "processing_ocr", { mimetype: media.mimetype, imageBytes: image.length });
+    recordMessage(message, source, "processing_ocr", {
+      mimetype: media.mimetype,
+      imageBytes: image.length,
+      downloadSource: media.downloadSource || null,
+      downloadAttempts: media.downloadAttempts || null,
+    });
     const result = await extractIdentityDocument(image, media.mimetype, media.filename);
     let reply = result.formattedText;
     if (Array.isArray(result.warnings) && result.warnings.length > 0) {
@@ -335,6 +342,171 @@ async function extractIdentityDocument(image, mimetype, originalFilename) {
   }
 }
 
+async function downloadMessageMedia(message) {
+  const downloadErrors = [];
+  let currentMessage = message;
+
+  for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_RETRIES; attempt += 1) {
+    try {
+      const media = await currentMessage.downloadMedia();
+      if (media?.data) {
+        media.downloadSource = "whatsapp-web.js";
+        media.downloadAttempts = attempt;
+        return media;
+      }
+      downloadErrors.push({
+        source: "whatsapp-web.js",
+        attempt,
+        message: "downloadMedia returned no media data",
+      });
+    } catch (error) {
+      downloadErrors.push({
+        source: "whatsapp-web.js",
+        attempt,
+        ...errorDetails(error),
+      });
+    }
+
+    if (attempt < MEDIA_DOWNLOAD_RETRIES) {
+      await delay(MEDIA_DOWNLOAD_RETRY_DELAY_MS);
+      currentMessage = (await reloadOrResolveMessage(currentMessage)) || currentMessage;
+    }
+  }
+
+  try {
+    const media = await downloadMessageMediaDirect(currentMessage);
+    media.downloadSource = "direct-decrypt";
+    media.downloadAttempts = MEDIA_DOWNLOAD_RETRIES;
+    return media;
+  } catch (error) {
+    downloadErrors.push({
+      source: "direct-decrypt",
+      ...errorDetails(error),
+    });
+    const failure = new Error(
+      `WhatsApp media download failed after ${MEDIA_DOWNLOAD_RETRIES} attempt(s) and direct fallback.`,
+    );
+    failure.downloadErrors = downloadErrors;
+    failure.mediaSnapshot = redactedMediaSnapshot(currentMessage);
+    throw failure;
+  }
+}
+
+async function reloadOrResolveMessage(message) {
+  try {
+    if (explicitMessageId(message) && typeof message.reload === "function") {
+      const reloaded = await message.reload();
+      if (reloaded?.hasMedia) {
+        return reloaded;
+      }
+    }
+  } catch (error) {
+    console.warn(`Could not reload media message ${messageIdentityKey(message) || "unknown"}:`, error);
+  }
+
+  return findRecentMediaMessageWithId(message);
+}
+
+async function downloadMessageMediaDirect(message) {
+  const snapshot = mediaSnapshot(message);
+  if (!snapshot.directPath || !snapshot.mediaKey) {
+    throw mediaDownloadError("Direct media fallback is missing directPath or mediaKey.", {
+      mediaSnapshot: redactedMediaSnapshot(message),
+    });
+  }
+
+  const result = await client.pupPage.evaluate(async ({ msgId, snapshot }) => {
+    const errorDetails = (error) => ({
+      name: error?.name || error?.constructor?.name || "Error",
+      message: error?.message ? String(error.message) : String(error || "Unknown error"),
+      status: error?.status || null,
+      stack: error?.stack ? String(error.stack).split("\n").slice(0, 6).join("\n") : null,
+    });
+
+    const pick = (msg, field) => {
+      const candidates = [
+        msg?.[field],
+        msg?.mediaData?.[field],
+        msg?.mediaData?._mediaData?.[field],
+        snapshot?.[field],
+      ];
+      return candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== "") || null;
+    };
+
+    try {
+      const collection = window.require("WAWebCollections").Msg;
+      const msg = msgId
+        ? collection.get(msgId) || (await collection.getMessagesById([msgId]))?.messages?.[0] || null
+        : null;
+      const required = ["directPath", "mediaKey"];
+      const payload = {
+        directPath: pick(msg, "directPath"),
+        encFilehash: pick(msg, "encFilehash"),
+        filehash: pick(msg, "filehash"),
+        mediaKey: pick(msg, "mediaKey"),
+        mediaKeyTimestamp: pick(msg, "mediaKeyTimestamp"),
+        type: pick(msg, "type") || "image",
+        signal: new AbortController().signal,
+        downloadQpl: {
+          addAnnotations() {
+            return this;
+          },
+          addPoint() {
+            return this;
+          },
+        },
+      };
+      const missing = required.filter((field) => !payload[field]);
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          error: `Direct media fallback missing ${missing.join(", ")}.`,
+          debug: {
+            hasMsg: Boolean(msg),
+            mediaStage: msg?.mediaData?.mediaStage || null,
+            payloadKeys: Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, Boolean(value)])),
+          },
+        };
+      }
+
+      const decryptedMedia = await window
+        .require("WAWebDownloadManager")
+        .downloadManager.downloadAndMaybeDecrypt(payload);
+      const data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia);
+
+      return {
+        ok: true,
+        data,
+        mimetype: pick(msg, "mimetype") || snapshot.mimetype || "image/jpeg",
+        filename: pick(msg, "filename") || snapshot.filename || null,
+        filesize: pick(msg, "size") || snapshot.size || null,
+        debug: {
+          hasMsg: Boolean(msg),
+          mediaStage: msg?.mediaData?.mediaStage || null,
+        },
+      };
+    } catch (error) {
+      return { ok: false, error: errorDetails(error), debug: { hasWindowWWebJS: Boolean(window.WWebJS) } };
+    }
+  }, { msgId: explicitMessageId(message), snapshot });
+
+  if (!result?.ok) {
+    throw mediaDownloadError("Direct WhatsApp media decrypt failed.", {
+      browserError: result?.error || "No browser result",
+      browserDebug: result?.debug || null,
+      mediaSnapshot: redactedMediaSnapshot(message),
+    });
+  }
+
+  return {
+    data: result.data,
+    mimetype: result.mimetype,
+    filename: result.filename,
+    filesize: result.filesize,
+    browserDebug: result.debug || null,
+  };
+}
+
 async function sendMessagesHandler(request, response) {
   const phoneNumbers = request.body?.phoneNumbers;
   const message = request.body?.message;
@@ -381,6 +553,8 @@ function statusPayload() {
     groupsEnabled: ALLOW_GROUPS,
     ownMessagesEnabled: PROCESS_OWN_MESSAGES,
     missingIdMediaDelayMs: MISSING_ID_MEDIA_DELAY_MS,
+    mediaDownloadRetries: MEDIA_DOWNLOAD_RETRIES,
+    mediaDownloadRetryDelayMs: MEDIA_DOWNLOAD_RETRY_DELAY_MS,
   };
 }
 
@@ -568,11 +742,17 @@ function recordFailure(message, source, stage, error) {
 function errorDetails(error) {
   const message = error?.message ? String(error.message) : String(error || "Unknown error");
   const stack = error?.stack ? String(error.stack).split("\n").slice(0, 6).join("\n") : null;
-  return {
+  const details = {
     name: error?.name || error?.constructor?.name || "Error",
     message,
     stack,
   };
+  for (const key of ["downloadErrors", "mediaSnapshot", "browserError", "browserDebug"]) {
+    if (error?.[key] !== undefined) {
+      details[key] = error[key];
+    }
+  }
+  return details;
 }
 
 function delay(milliseconds) {
@@ -617,6 +797,56 @@ function explicitMessageId(message) {
     message._data?.stanzaId,
   ];
   return candidates.find((candidate) => typeof candidate === "string" && candidate.trim()) || "";
+}
+
+function mediaSnapshot(message) {
+  const data = message.rawData || message._data || {};
+  return {
+    id: explicitMessageId(message),
+    directPath: stringValue(data.directPath),
+    mediaKey: stringValue(data.mediaKey || message.mediaKey),
+    mediaKeyTimestamp: stringValue(data.mediaKeyTimestamp),
+    encFilehash: stringValue(data.encFilehash),
+    filehash: stringValue(data.filehash),
+    type: stringValue(data.type || message.type),
+    mimetype: stringValue(data.mimetype),
+    filename: stringValue(data.filename),
+    size: data.size || null,
+    mediaStage: stringValue(data.mediaData?.mediaStage),
+  };
+}
+
+function redactedMediaSnapshot(message) {
+  const snapshot = mediaSnapshot(message);
+  return {
+    id: snapshot.id || null,
+    type: snapshot.type || null,
+    mimetype: snapshot.mimetype || null,
+    filename: snapshot.filename || null,
+    size: snapshot.size || null,
+    mediaStage: snapshot.mediaStage || null,
+    hasDirectPath: Boolean(snapshot.directPath),
+    hasMediaKey: Boolean(snapshot.mediaKey),
+    hasMediaKeyTimestamp: Boolean(snapshot.mediaKeyTimestamp),
+    hasEncFilehash: Boolean(snapshot.encFilehash),
+    hasFilehash: Boolean(snapshot.filehash),
+  };
+}
+
+function mediaDownloadError(message, details = {}) {
+  const error = new Error(message);
+  Object.assign(error, details);
+  return error;
+}
+
+function stringValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return "";
 }
 
 function mediaIdentity(message) {

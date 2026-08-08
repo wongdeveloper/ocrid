@@ -154,6 +154,7 @@ curl http://127.0.0.1:3001/whatsapp/status
 The status response includes `lastMessage`, `lastInboundMessage`, `lastFailure`, and `messageStats`. If an image is not processed, check `lastFailure.stage` and `lastFailure.message` first, then `lastInboundMessage.reason`. Common ignore reasons are `group_messages_disabled` for group chats and `from_me_disabled` when testing by sending an image from the same WhatsApp account that is linked as the worker. Newer WhatsApp Web events may not expose a serialized message id, so the worker falls back to a media fingerprint; `idSource` shows whether the id came from `message_id`, `media_fingerprint`, or message metadata. Set `WHATSAPP_WEB_ALLOW_GROUPS=true` to process groups. For own-account media testing, set `WHATSAPP_WEB_PROCESS_OWN_MESSAGES=true`; own non-media messages are still ignored to avoid reply loops.
 
 WhatsApp OCR requests wait up to 10 minutes by default. Override this with `WHATSAPP_OCR_TIMEOUT_MS` in the deployed `.env` file if large images need more time, for example `WHATSAPP_OCR_TIMEOUT_MS=900000`.
+Media download uses `message.downloadMedia()` first, then retries and falls back to direct WhatsApp media decrypt when WhatsApp Web throws an opaque browser error. Tune with `WHATSAPP_MEDIA_DOWNLOAD_RETRIES`, `WHATSAPP_MEDIA_DOWNLOAD_RETRY_DELAY_MS`, and `WHATSAPP_MISSING_ID_MEDIA_DELAY_MS`. If it still fails, inspect `lastFailure.downloadErrors` and the redacted `lastFailure.mediaSnapshot`.
 
 Send a WhatsApp message directly:
 
